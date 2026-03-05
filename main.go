@@ -1273,6 +1273,7 @@ const (
 	stateExportPrompt
 	stateConfirm
 	stateWorking
+	stateHelp
 	stateOutput
 )
 
@@ -1379,6 +1380,7 @@ type model struct {
 	dryRun             bool
 	progressCh         chan progressMsg
 	progressText       string
+	helpReturnState    menuState
 }
 
 type uiStyles struct {
@@ -1720,6 +1722,54 @@ func (m model) defaultExportPath() string {
 	return filepath.Join(exportBaseDir(), fmt.Sprintf("%s-%s.csv", name, stamp))
 }
 
+func helpTextForState(state menuState) string {
+	switch state {
+	case stateMain, stateUsersGroups, stateDevicesApps, stateReports, stateReportCsv, stateReportInspect, stateSettings:
+		return strings.Join([]string{
+			"Menu Help",
+			"",
+			"Up/Down or j/k: Move selection",
+			"PgUp/PgDn: Move by page",
+			"Home/End: Jump to top or bottom",
+			"Enter: Select item",
+			"/: Filter menu options",
+			"q: Back or quit from main menu",
+			"?: Open this help",
+		}, "\n")
+	case stateOutput:
+		return strings.Join([]string{
+			"Result Help",
+			"",
+			"Up/Down PgUp/PgDn Home/End: Scroll result",
+			"e: Export current table when available",
+			"Enter/Esc: Return to previous menu",
+			"?: Open this help",
+		}, "\n")
+	case stateWorking:
+		return strings.Join([]string{
+			"Working Help",
+			"",
+			"Spinner and progress text show current Graph activity.",
+			"Ctrl+C: Quit application",
+			"?: Open this help",
+		}, "\n")
+	case stateConfirm:
+		return strings.Join([]string{
+			"Confirm Help",
+			"",
+			"y or Enter: Confirm",
+			"n or Esc: Cancel",
+			"?: Open this help",
+		}, "\n")
+	default:
+		return strings.Join([]string{
+			"Help",
+			"",
+			"Esc or Enter: Close help",
+		}, "\n")
+	}
+}
+
 func isWriteAction(id actionID) bool {
 	switch id {
 	case actAddUsersCSV, actMakeGroupsCSV, actAddAppsCSV, actSetClientID, actSetTenantID, actResetAuth:
@@ -2006,6 +2056,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case stateMain, stateUsersGroups, stateDevicesApps, stateReports, stateReportCsv, stateReportInspect, stateSettings:
 			visible := m.visibleMenu()
 			switch msg.String() {
+			case "?":
+				m.helpReturnState = m.state
+				m.state = stateHelp
+				return m, nil
 			case "ctrl+c", "q":
 				if m.state == stateMain {
 					return m, tea.Quit
@@ -2182,6 +2236,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		case stateConfirm:
 			switch msg.String() {
+			case "?":
+				m.helpReturnState = m.state
+				m.state = stateHelp
+				return m, nil
 			case "n", "esc":
 				cancelState := m.confirmCancelState
 				m.clearConfirm()
@@ -2230,11 +2288,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case stateWorking:
-			if msg.String() == "ctrl+c" {
+			switch msg.String() {
+			case "?":
+				m.helpReturnState = m.state
+				m.state = stateHelp
+				return m, nil
+			case "ctrl+c":
 				return m, tea.Quit
+			}
+		case stateHelp:
+			switch msg.String() {
+			case "enter", "esc", "?":
+				m.state = m.helpReturnState
+				return m, nil
 			}
 		case stateOutput:
 			switch msg.String() {
+			case "?":
+				m.helpReturnState = m.state
+				m.state = stateHelp
+				return m, nil
 			case "enter", "esc":
 				m.returnToLastMenu()
 				m.output = ""
@@ -2284,6 +2357,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	switch m.state {
+	case stateHelp:
+		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
+			m.styles.subHeader.Render("Keyboard Help"),
+			helpTextForState(m.helpReturnState),
+			m.styles.hint.Render("Enter/Esc/?: close help"),
+		))
+		return m.styles.app.Render(m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
 	case stateConfirm:
 		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
 			m.styles.subHeader.Render(m.confirmTitle),
