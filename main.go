@@ -1081,6 +1081,7 @@ const (
 	stateUsersGroups
 	stateDevicesApps
 	stateReports
+	stateReportCsv
 	stateSettings
 	stateMenuFilter
 	stateInput
@@ -1155,11 +1156,12 @@ type model struct {
 	height        int
 	lastMenuState menuState
 
-	mainMenu []menuItem
-	userMenu []menuItem
-	devMenu  []menuItem
-	repMenu  []menuItem
-	cfgMenu  []menuItem
+	mainMenu   []menuItem
+	userMenu   []menuItem
+	devMenu    []menuItem
+	repMenu    []menuItem
+	repCSVMenu []menuItem
+	cfgMenu    []menuItem
 
 	spin        spinner.Model
 	viewport    viewport.Model
@@ -1263,10 +1265,14 @@ func newModel(client *graphClient) model {
 		repMenu: []menuItem{
 			{label: "Device compliance snapshot", description: "Compliant/noncompliant totals from Intune managed devices", action: actReportComplianceSnapshot},
 			{label: "Top 10 failing app deployments", description: "Rank apps by failed device install statuses", action: actReportTopFailingApps},
+			{label: "CSV validation checks", description: "Run strict quality checks for CSV workflows", next: stateReportCsv},
+			{label: "Back", description: "Return to main menu", next: stateMain},
+		},
+		repCSVMenu: []menuItem{
 			{label: "Validate Users->Group CSV", description: "Strict quality checks for User_Principal_Name format", action: actReportCsvUsers},
 			{label: "Validate Create-Groups CSV", description: "Strict quality checks for Group_Name format", action: actReportCsvGroups},
 			{label: "Validate App-Assignment CSV", description: "Strict quality checks for Group_Name + App_Name format", action: actReportCsvApps},
-			{label: "Back", description: "Return to main menu", next: stateMain},
+			{label: "Back", description: "Return to Reports menu", next: stateReports},
 		},
 		cfgMenu: []menuItem{
 			{label: "Set Graph Client ID", description: "App registration client ID used for sign-in", action: actSetClientID},
@@ -1299,6 +1305,8 @@ func (m model) menu() []menuItem {
 		return m.devMenu
 	case stateReports:
 		return m.repMenu
+	case stateReportCsv:
+		return m.repCSVMenu
 	case stateSettings:
 		return m.cfgMenu
 	default:
@@ -1647,7 +1655,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		switch m.state {
-		case stateMain, stateUsersGroups, stateDevicesApps, stateReports, stateSettings:
+		case stateMain, stateUsersGroups, stateDevicesApps, stateReports, stateReportCsv, stateSettings:
 			visible := m.visibleMenu()
 			switch msg.String() {
 			case "ctrl+c", "q":
@@ -1731,7 +1739,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.resetMenuPosition(stateMain)
 					return m, nil
 				}
-				if item.next == stateUsersGroups || item.next == stateDevicesApps || item.next == stateReports || item.next == stateSettings {
+				if item.next == stateUsersGroups || item.next == stateDevicesApps || item.next == stateReports || item.next == stateReportCsv || item.next == stateSettings {
 					m.resetMenuPosition(item.next)
 					return m, nil
 				}
@@ -1998,6 +2006,9 @@ func (m model) View() string {
 		} else if m.state == stateReports {
 			title = "Reports"
 			sub = "Read-only analytics and strict CSV quality checks"
+		} else if m.state == stateReportCsv {
+			title = "Reports - CSV Validation"
+			sub = "Strict schema and data-quality validation for CSV workflows"
 		} else if m.state == stateSettings {
 			title = "Settings"
 			sub = "Authentication configuration for Microsoft Graph"
