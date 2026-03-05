@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -609,6 +610,65 @@ func (g *graphClient) reportComplianceSnapshot(ctx context.Context) (string, err
 	), nil
 }
 
+func (g *graphClient) reportTopFailingApps(ctx context.Context) (string, error) {
+	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName")
+	if err != nil {
+		return "", err
+	}
+	type appFail struct {
+		Name   string
+		Failed int
+		Total  int
+	}
+	agg := make([]appFail, 0, len(apps))
+	for i, app := range apps {
+		if (i+1)%20 == 0 {
+			g.emitProgress(fmt.Sprintf("Processed %d/%d apps...", i+1, len(apps)))
+		}
+		appID := asString(app["id"])
+		name := asString(app["displayName"])
+		statuses, err := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/deviceStatuses?$select=installState,deviceId", appID))
+		if err != nil {
+			continue
+		}
+		failed := 0
+		total := 0
+		for _, s := range statuses {
+			total++
+			if strings.EqualFold(strings.TrimSpace(asString(s["installState"])), "failed") {
+				failed++
+			}
+		}
+		agg = append(agg, appFail{Name: name, Failed: failed, Total: total})
+	}
+	sort.Slice(agg, func(i, j int) bool {
+		if agg[i].Failed == agg[j].Failed {
+			return strings.ToLower(agg[i].Name) < strings.ToLower(agg[j].Name)
+		}
+		return agg[i].Failed > agg[j].Failed
+	})
+
+	limit := 10
+	if len(agg) < limit {
+		limit = len(agg)
+	}
+	rows := make([][]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		r := agg[i]
+		rate := "0.0%"
+		if r.Total > 0 {
+			rate = fmt.Sprintf("%.1f%%", (float64(r.Failed)/float64(r.Total))*100)
+		}
+		rows = append(rows, []string{fmt.Sprintf("%d", i+1), r.Name, fmt.Sprintf("%d", r.Failed), fmt.Sprintf("%d", r.Total), rate})
+	}
+	if len(rows) == 0 {
+		return "Top 10 Failing App Deployments\n\nNo app status data found.", nil
+	}
+	return fmt.Sprintf("Top 10 Failing App Deployments\n\n%s",
+		renderTable([]string{"Rank", "App", "Failed Devices", "Total Statuses", "Failure Rate"}, rows),
+	), nil
+}
+
 func (g *graphClient) listDevicesInGroup(ctx context.Context, groupName string) (string, error) {
 	group, err := g.findGroupByDisplayName(ctx, groupName)
 	if err != nil {
@@ -1045,6 +1105,7 @@ const (
 	actAddAppsCSV
 	actListGroupApps
 	actReportComplianceSnapshot
+	actReportTopFailingApps
 	actReportCsvUsers
 	actReportCsvGroups
 	actReportCsvApps
@@ -1201,6 +1262,7 @@ func newModel(client *graphClient) model {
 		},
 		repMenu: []menuItem{
 			{label: "Device compliance snapshot", description: "Compliant/noncompliant totals from Intune managed devices", action: actReportComplianceSnapshot},
+			{label: "Top 10 failing app deployments", description: "Rank apps by failed device install statuses", action: actReportTopFailingApps},
 			{label: "Validate Users->Group CSV", description: "Strict quality checks for User_Principal_Name format", action: actReportCsvUsers},
 			{label: "Validate Create-Groups CSV", description: "Strict quality checks for Group_Name format", action: actReportCsvGroups},
 			{label: "Validate App-Assignment CSV", description: "Strict quality checks for Group_Name + App_Name format", action: actReportCsvApps},
@@ -1532,6 +1594,8 @@ func (m model) runActionCmd(spec actionSpec, inputs []string) tea.Cmd {
 			out, err = m.client.listDevices(ctx)
 		case actReportComplianceSnapshot:
 			out, err = m.client.reportComplianceSnapshot(ctx)
+		case actReportTopFailingApps:
+			out, err = m.client.reportTopFailingApps(ctx)
 		case actListDevicesGroup:
 			out, err = m.client.listDevicesInGroup(ctx, inputs[0])
 		case actMakeGroupsCSV:
