@@ -37,10 +37,11 @@ const (
 )
 
 type graphClient struct {
-	cred  *azidentity.DeviceCodeCredential
-	http  *http.Client
-	scope []string
-	cfg   authConfig
+	cred         *azidentity.DeviceCodeCredential
+	http         *http.Client
+	scope        []string
+	cfg          authConfig
+	progressHook func(string)
 }
 
 type authConfig struct {
@@ -206,9 +207,20 @@ func (g *graphClient) list(ctx context.Context, path string) ([]map[string]any, 
 			return nil, err
 		}
 		all = append(all, page.Value...)
+		g.emitProgress(fmt.Sprintf("Fetched %d items from %s", len(all), path))
 		next = page.NextLink
 	}
 	return all, nil
+}
+
+func (g *graphClient) setProgressHook(hook func(string)) {
+	g.progressHook = hook
+}
+
+func (g *graphClient) emitProgress(text string) {
+	if g.progressHook != nil {
+		g.progressHook(text)
+	}
 }
 
 func escapeOData(s string) string {
@@ -772,6 +784,10 @@ type resultMsg struct {
 	err  error
 }
 
+type progressMsg struct {
+	text string
+}
+
 type confirmKind int
 
 const (
@@ -816,6 +832,8 @@ type model struct {
 	pendingInputs      []string
 	pendingExportPath  string
 	dryRun             bool
+	progressCh         chan progressMsg
+	progressText       string
 }
 
 type uiStyles struct {
@@ -904,6 +922,7 @@ func newModel(client *graphClient) model {
 		filterInput: fi,
 		exportInput: ei,
 		viewport:    viewport.New(80, 20),
+		progressCh:  make(chan progressMsg, 64),
 	}
 }
 
@@ -1074,6 +1093,13 @@ func (m *model) clearConfirm() {
 	m.pendingExportPath = ""
 }
 
+func waitProgressCmd(ch <-chan progressMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg := <-ch
+		return msg
+	}
+}
+
 func specForAction(id actionID) actionSpec {
 	switch id {
 	case actListUsersGroup:
@@ -1175,6 +1201,13 @@ func (m *model) runLocalAction(id actionID, inputs []string) (string, error, boo
 func (m model) runActionCmd(spec actionSpec, inputs []string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
+		m.client.setProgressHook(func(text string) {
+			select {
+			case m.progressCh <- progressMsg{text: text}:
+			default:
+			}
+		})
+		defer m.client.setProgressHook(nil)
 		var (
 			out string
 			err error
@@ -1292,7 +1325,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						m.state = stateWorking
 						m.output = ""
-						return m, tea.Batch(m.spin.Tick, m.runActionCmd(spec, nil))
+						m.progressText = "Starting operation..."
+						return m, tea.Batch(m.spin.Tick, waitProgressCmd(m.progressCh), m.runActionCmd(spec, nil))
 					}
 					m.currentSpec = spec
 					m.inputs = nil
@@ -1361,7 +1395,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.state = stateWorking
 				m.output = ""
-				return m, tea.Batch(m.spin.Tick, m.runActionCmd(m.currentSpec, m.inputs))
+				m.progressText = "Starting operation..."
+				return m, tea.Batch(m.spin.Tick, waitProgressCmd(m.progressCh), m.runActionCmd(m.currentSpec, m.inputs))
 			}
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
@@ -1416,7 +1451,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.state = stateWorking
 					m.output = ""
-					return m, tea.Batch(m.spin.Tick, m.runActionCmd(spec, inputs))
+					m.progressText = "Starting operation..."
+					return m, tea.Batch(m.spin.Tick, waitProgressCmd(m.progressCh), m.runActionCmd(spec, inputs))
 				case confirmExport:
 					path := m.pendingExportPath
 					m.clearConfirm()
@@ -1472,12 +1508,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spin, cmd = m.spin.Update(msg)
 			return m, cmd
 		}
+	case progressMsg:
+		if m.state == stateWorking {
+			m.progressText = msg.text
+			return m, waitProgressCmd(m.progressCh)
+		}
 	case resultMsg:
 		if msg.err != nil {
 			m.setOutput("Error:\n" + msg.err.Error())
 		} else {
 			m.setOutput(msg.text)
 		}
+		m.progressText = ""
 		return m, nil
 	}
 	return m, nil
@@ -1517,9 +1559,13 @@ func (m model) View() string {
 		))
 		return m.styles.app.Render(m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
 	case stateWorking:
+		progress := m.progressText
+		if strings.TrimSpace(progress) == "" {
+			progress = "Starting operation..."
+		}
 		body := m.styles.panel.Render(fmt.Sprintf("%s Running Graph operation...\n\n%s",
 			m.spin.View(),
-			m.styles.hint.Render("Please wait; large tenants can take a while."),
+			m.styles.hint.Render(progress),
 		))
 		return m.styles.app.Render(m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
 	case stateOutput:
