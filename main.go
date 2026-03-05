@@ -755,7 +755,7 @@ func (g *graphClient) addAppsCSV(ctx context.Context, csvPath string, dryRun boo
 	return b.String(), nil
 }
 
-func (g *graphClient) listGroupApps(ctx context.Context, exportPath string, doExport bool) (string, error) {
+func (g *graphClient) listGroupApps(ctx context.Context) (string, error) {
 	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName")
 	if err != nil {
 		return "", err
@@ -808,26 +808,6 @@ func (g *graphClient) listGroupApps(ctx context.Context, exportPath string, doEx
 		tabRows = append(tabRows, []string{r.AppName, r.GroupName, r.AssignmentID, r.Intent})
 	}
 	fmt.Fprintf(&b, "App-group assignments: %d\n\n%s", len(rows), renderTable([]string{"App", "Group", "Assignment ID", "Intent"}, tabRows))
-
-	if doExport {
-		f, err := os.Create(exportPath)
-		if err != nil {
-			return "", err
-		}
-		defer f.Close()
-		w := csv.NewWriter(f)
-		_ = w.Write([]string{"AppName", "GroupName", "AssignmentId", "Intent"})
-		for _, r := range rows {
-			_ = w.Write([]string{r.AppName, r.GroupName, r.AssignmentID, r.Intent})
-		}
-		w.Flush()
-		if w.Error() != nil {
-			return "", w.Error()
-		}
-		fmt.Fprintf(&b, "\nExported CSV: %s\n", exportPath)
-	} else {
-		fmt.Fprintf(&b, "\nDry-run: would export CSV to %s\n", exportPath)
-	}
 	return b.String(), nil
 }
 
@@ -1006,7 +986,7 @@ func newModel(client *graphClient) model {
 			{label: "List devices in group", description: "Show only device members for a group", action: actListDevicesGroup},
 			{label: "Create groups from CSV", description: "CSV header required: Group_Name", action: actMakeGroupsCSV},
 			{label: "Assign apps by CSV", description: "CSV headers required: Group_Name, App_Name", action: actAddAppsCSV},
-			{label: "List app-group assignments", description: "Show assignments and export to CSV", action: actListGroupApps},
+			{label: "List app-group assignments", description: "Show deployments in a table (press e in results to export)", action: actListGroupApps},
 			{label: "Back", description: "Return to main menu", next: stateMain},
 		},
 		cfgMenu: []menuItem{
@@ -1123,7 +1103,7 @@ func (m *model) setOutput(text string) {
 
 func isWriteAction(id actionID) bool {
 	switch id {
-	case actAddUsersCSV, actMakeGroupsCSV, actAddAppsCSV, actListGroupApps, actSetClientID, actSetTenantID, actResetAuth:
+	case actAddUsersCSV, actMakeGroupsCSV, actAddAppsCSV, actSetClientID, actSetTenantID, actResetAuth:
 		return true
 	default:
 		return false
@@ -1138,8 +1118,6 @@ func confirmBodyForAction(spec actionSpec, inputs []string) string {
 		return fmt.Sprintf("This will create groups from CSV.\n\nCSV: %s", safeInput(inputs, 0))
 	case actAddAppsCSV:
 		return fmt.Sprintf("This will assign apps to groups from CSV.\n\nCSV: %s", safeInput(inputs, 0))
-	case actListGroupApps:
-		return fmt.Sprintf("This will export app/group assignments to disk.\n\nExport path: %s", safeInput(inputs, 0))
 	case actSetClientID:
 		return fmt.Sprintf("This will update and persist Graph Client ID.\n\nNew Client ID: %s", safeInput(inputs, 0))
 	case actSetTenantID:
@@ -1216,8 +1194,6 @@ func specForAction(id actionID) actionSpec {
 		return actionSpec{id: id, prompts: []string{"Enter CSV path (header: Group_Name)"}}
 	case actAddAppsCSV:
 		return actionSpec{id: id, prompts: []string{"Enter CSV path (headers: Group_Name, App_Name)"}}
-	case actListGroupApps:
-		return actionSpec{id: id, prompts: []string{"Enter export CSV path"}}
 	case actSetClientID:
 		return actionSpec{id: id, prompts: []string{"Enter Graph client ID"}}
 	case actSetTenantID:
@@ -1336,7 +1312,7 @@ func (m model) runActionCmd(spec actionSpec, inputs []string) tea.Cmd {
 		case actAddAppsCSV:
 			out, err = m.client.addAppsCSV(ctx, inputs[0], m.dryRun)
 		case actListGroupApps:
-			out, err = m.client.listGroupApps(ctx, inputs[0], !m.dryRun)
+			out, err = m.client.listGroupApps(ctx)
 		default:
 			out = "No action."
 		}
