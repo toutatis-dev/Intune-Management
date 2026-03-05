@@ -1173,19 +1173,20 @@ type model struct {
 	repCSVMenu []menuItem
 	cfgMenu    []menuItem
 
-	spin        spinner.Model
-	viewport    viewport.Model
-	vpReady     bool
-	styles      uiStyles
-	input       textinput.Model
-	filterInput textinput.Model
-	exportInput textinput.Model
-	filterQuery string
-	currentSpec actionSpec
-	inputs      []string
-	output      string
-	lastHeaders []string
-	lastRows    [][]string
+	spin            spinner.Model
+	viewport        viewport.Model
+	vpReady         bool
+	styles          uiStyles
+	input           textinput.Model
+	filterInput     textinput.Model
+	exportInput     textinput.Model
+	filterQuery     string
+	currentSpec     actionSpec
+	inputs          []string
+	output          string
+	lastHeaders     []string
+	lastRows        [][]string
+	lastActionLabel string
 
 	confirmKind        confirmKind
 	confirmTitle       string
@@ -1398,6 +1399,80 @@ func (m *model) setOutput(text string) {
 		m.lastRows = r
 	}
 	m.state = stateOutput
+}
+
+func actionLabel(id actionID) string {
+	switch id {
+	case actListUsersGroup:
+		return "List Users In Group"
+	case actListGroups:
+		return "List All Groups"
+	case actListUsers:
+		return "List All Users"
+	case actSearchGroups:
+		return "Search Groups"
+	case actAddUsersCSV:
+		return "Bulk Add Users (CSV)"
+	case actListDevices:
+		return "List All Devices"
+	case actListDevicesGroup:
+		return "List Devices In Group"
+	case actMakeGroupsCSV:
+		return "Create Groups From CSV"
+	case actAddAppsCSV:
+		return "Assign Apps By CSV"
+	case actListGroupApps:
+		return "List App-Group Assignments"
+	case actReportComplianceSnapshot:
+		return "Device Compliance Snapshot"
+	case actReportTopFailingApps:
+		return "Top 10 Failing App Deployments"
+	case actReportCsvUsers:
+		return "Validate Users->Group CSV"
+	case actReportCsvGroups:
+		return "Validate Create-Groups CSV"
+	case actReportCsvApps:
+		return "Validate App-Assignment CSV"
+	case actSetClientID:
+		return "Set Graph Client ID"
+	case actSetTenantID:
+		return "Set Graph Tenant ID"
+	case actViewAuth:
+		return "View Current Auth Config"
+	case actAuthHealth:
+		return "Auth Health"
+	case actResetAuth:
+		return "Reset Auth Defaults"
+	case actToggleDryRun:
+		return "Toggle Dry-Run Mode"
+	default:
+		return "Result"
+	}
+}
+
+func (m model) resultSummaryView() string {
+	rowCount := "n/a"
+	if len(m.lastRows) > 0 {
+		rowCount = fmt.Sprintf("%d", len(m.lastRows))
+	}
+	exportState := "unavailable"
+	if len(m.lastHeaders) > 0 && len(m.lastRows) > 0 {
+		exportState = "available"
+	}
+	mode := "LIVE"
+	if m.dryRun {
+		mode = "DRY-RUN"
+	}
+
+	lines := []string{
+		fmt.Sprintf("Action: %s", m.lastActionLabel),
+		fmt.Sprintf("Tenant: %s", m.client.cfg.TenantID),
+		fmt.Sprintf("Client: %s", m.client.cfg.ClientID),
+		fmt.Sprintf("Mode: %s", mode),
+		fmt.Sprintf("Rows: %s", rowCount),
+		fmt.Sprintf("Export: %s", exportState),
+	}
+	return m.styles.panel.Render(strings.Join(lines, "\n"))
 }
 
 func isWriteAction(id actionID) bool {
@@ -1655,7 +1730,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Width = minInt(72, maxInt(24, msg.Width-16))
 		m.exportInput.Width = minInt(72, maxInt(24, msg.Width-16))
 		panelInnerW := maxInt(20, msg.Width-12)
-		panelInnerH := maxInt(6, msg.Height-10)
+		panelInnerH := maxInt(6, msg.Height-18)
 		m.viewport.Width = panelInnerW
 		m.viewport.Height = panelInnerH
 		if m.output != "" {
@@ -1716,6 +1791,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if item.action != actNone {
 					spec := specForAction(item.action)
+					m.lastActionLabel = actionLabel(spec.id)
 					m.lastMenuState = m.state
 					if len(spec.prompts) == 0 {
 						if isWriteAction(spec.id) {
@@ -1998,12 +2074,13 @@ func (m model) View() string {
 		if len(m.lastHeaders) > 0 && len(m.lastRows) > 0 {
 			exportHint = "Up/Down PgUp/PgDn Home/End: scroll   e: export table   Enter/Esc: return"
 		}
+		headerPanel := m.resultSummaryView()
 		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
 			prefix,
 			content,
 			m.styles.hint.Render(exportHint),
 		))
-		return m.styles.app.Render(m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
+		return m.styles.app.Render(m.styles.header.Render(" Intune Management Tool ") + "\n\n" + headerPanel + "\n\n" + body)
 	default:
 		title := "Main Menu"
 		sub := "Pick an operation area"
