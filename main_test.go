@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -229,6 +230,147 @@ func TestValidateForActionMapsCSVActions(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("expected non-CSV action to skip validation")
+	}
+}
+
+func TestClassifyWindowsVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		operatingSystem string
+		osVersion       string
+		want            string
+	}{
+		{name: "windows 11", operatingSystem: "Windows", osVersion: "10.0.22631", want: "Windows 11"},
+		{name: "windows 10", operatingSystem: "Windows", osVersion: "10.0.19045", want: "Windows 10"},
+		{name: "non windows", operatingSystem: "iOS", osVersion: "17.0", want: "Other/Unknown"},
+		{name: "bad version", operatingSystem: "Windows", osVersion: "unknown", want: "Other/Unknown"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := classifyWindowsVersion(tt.operatingSystem, tt.osVersion); got != tt.want {
+				t.Fatalf("classifyWindowsVersion(%q, %q) = %q, want %q", tt.operatingSystem, tt.osVersion, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderInspectorProducesParsableFieldValueTable(t *testing.T) {
+	t.Parallel()
+
+	out := renderInspector("App Inspector", [][2]string{
+		{"Display Name", "Company Portal"},
+		{"Assignment Count", "3"},
+	})
+
+	if !strings.Contains(out, "App Inspector") {
+		t.Fatalf("expected inspector title in output:\n%s", out)
+	}
+	headers, rows, ok := parseTableFromText(out)
+	if !ok {
+		t.Fatalf("expected inspector output to contain a table:\n%s", out)
+	}
+	if strings.Join(headers, "|") != "Field|Value" {
+		t.Fatalf("unexpected headers: %v", headers)
+	}
+	if len(rows) != 2 || rows[0][0] != "Display Name" || rows[1][1] != "3" {
+		t.Fatalf("unexpected rows: %v", rows)
+	}
+}
+
+func TestActionLabelCoversNewActions(t *testing.T) {
+	t.Parallel()
+
+	cases := map[actionID]string{
+		actReportWindowsBreakdown: "Windows OS Breakdown",
+		actInspectApp:             "Inspect App",
+		actAuthHealth:             "Auth Health",
+	}
+	for id, want := range cases {
+		if got := actionLabel(id); got != want {
+			t.Fatalf("actionLabel(%v) = %q, want %q", id, got, want)
+		}
+	}
+}
+
+func TestSlugifyNameAndDefaultExportPath(t *testing.T) {
+	t.Parallel()
+
+	if got := slugifyName(" Top 10 Failing App Deployments "); got != "top-10-failing-app-deployments" {
+		t.Fatalf("unexpected slugifyName result: %q", got)
+	}
+	if got := slugifyName("!!!"); got != "report" {
+		t.Fatalf("expected fallback slug, got %q", got)
+	}
+
+	m := model{lastActionLabel: "Windows OS Breakdown"}
+	path := m.defaultExportPath()
+	if filepath.Ext(path) != ".csv" {
+		t.Fatalf("expected csv extension, got %q", path)
+	}
+	if filepath.Dir(path) != exportBaseDir() {
+		t.Fatalf("expected export path under %q, got %q", exportBaseDir(), filepath.Dir(path))
+	}
+	base := filepath.Base(path)
+	matched, err := regexp.MatchString(`^windows-os-breakdown-\d{8}-\d{6}\.csv$`, base)
+	if err != nil {
+		t.Fatalf("regexp.MatchString failed: %v", err)
+	}
+	if !matched {
+		t.Fatalf("unexpected export filename shape: %q", base)
+	}
+}
+
+func TestHelpTextForState(t *testing.T) {
+	t.Parallel()
+
+	menuHelp := helpTextForState(stateReports)
+	if !strings.Contains(menuHelp, "Menu Help") || !strings.Contains(menuHelp, "Esc: Back") {
+		t.Fatalf("unexpected menu help text:\n%s", menuHelp)
+	}
+
+	resultHelp := helpTextForState(stateOutput)
+	if !strings.Contains(resultHelp, "Result Help") || !strings.Contains(resultHelp, "e: Export current table") {
+		t.Fatalf("unexpected result help text:\n%s", resultHelp)
+	}
+
+	fallbackHelp := helpTextForState(stateHelp)
+	if !strings.Contains(fallbackHelp, "Close help") {
+		t.Fatalf("unexpected fallback help text:\n%s", fallbackHelp)
+	}
+}
+
+func TestResultSummaryViewIncludesStickyContext(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		client: &graphClient{cfg: authConfig{TenantID: "tenant-123", ClientID: "client-abc"}},
+		styles: newUIStyles(),
+		lastActionLabel: "Top 10 Failing App Deployments",
+		lastHeaders: []string{"App", "Count"},
+		lastRows: [][]string{
+			{"Portal", "4"},
+			{"VPN", "2"},
+		},
+		dryRun: true,
+	}
+
+	out := m.resultSummaryView()
+	for _, want := range []string{
+		"Action: Top 10 Failing App Deployments",
+		"Tenant: tenant-123",
+		"Client: client-abc",
+		"Mode: DRY-RUN",
+		"Rows: 2",
+		"Export: available",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected summary to contain %q:\n%s", want, out)
+		}
 	}
 }
 
