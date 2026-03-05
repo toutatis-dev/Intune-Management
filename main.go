@@ -726,6 +726,55 @@ func (g *graphClient) reportTopFailingApps(ctx context.Context) (string, error) 
 	), nil
 }
 
+func (g *graphClient) reportAppFailureDetails(ctx context.Context, identifier string) (string, error) {
+	var app map[string]any
+	body, err := g.do(ctx, http.MethodGet, graphBase+"/deviceAppManagement/mobileApps/"+url.PathEscape(identifier)+"?$select=id,displayName", nil)
+	if err == nil {
+		if err := json.Unmarshal(body, &app); err != nil {
+			return "", err
+		}
+	} else {
+		filter := url.QueryEscape(fmt.Sprintf("displayName eq '%s'", escapeOData(identifier)))
+		items, ferr := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName&$filter="+filter)
+		if ferr != nil {
+			return "", ferr
+		}
+		if len(items) == 0 {
+			return "", errors.New("app not found")
+		}
+		app = items[0]
+	}
+
+	statuses, err := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/deviceStatuses", url.PathEscape(asString(app["id"]))))
+	if err != nil {
+		return "", err
+	}
+	rows := make([][]string, 0)
+	for _, s := range statuses {
+		if !strings.EqualFold(strings.TrimSpace(asString(s["installState"])), "failed") {
+			continue
+		}
+		deviceName := asString(s["deviceDisplayName"])
+		if deviceName == "" {
+			deviceName = asString(s["deviceName"])
+		}
+		rows = append(rows, []string{
+			deviceName,
+			asString(s["deviceId"]),
+			asString(s["installState"]),
+			asString(s["lastSyncDateTime"]),
+		})
+	}
+	if len(rows) == 0 {
+		return fmt.Sprintf("Failing App Drill-Down\n\nApp: %s\n\nNo failed device statuses found.", asString(app["displayName"])), nil
+	}
+	return fmt.Sprintf("Failing App Drill-Down\n\nApp: %s\nFailed devices: %d\n\n%s",
+		asString(app["displayName"]),
+		len(rows),
+		renderTable([]string{"Device Name", "Device ID", "State", "Last Sync"}, rows),
+	), nil
+}
+
 func renderInspector(title string, values [][2]string) string {
 	rows := make([][]string, 0, len(values))
 	for _, pair := range values {
@@ -1141,6 +1190,27 @@ func previewForAction(spec actionSpec, inputs []string) (string, bool, error) {
 	}
 }
 
+func resolveTopFailingAppSelection(input string, rows [][]string) (string, error) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return "", errors.New("selection cannot be empty")
+	}
+	if rank, err := strconv.Atoi(trimmed); err == nil {
+		for _, row := range rows {
+			if len(row) >= 2 && row[0] == fmt.Sprintf("%d", rank) {
+				return row[1], nil
+			}
+		}
+		return "", errors.New("rank not found in current report")
+	}
+	for _, row := range rows {
+		if len(row) >= 2 && strings.EqualFold(strings.TrimSpace(row[1]), trimmed) {
+			return row[1], nil
+		}
+	}
+	return "", errors.New("app not found in current report")
+}
+
 func (g *graphClient) addUsersCSV(ctx context.Context, csvPath, groupName string, dryRun bool) (string, error) {
 	rows, err := readCSV(csvPath)
 	if err != nil {
@@ -1343,6 +1413,7 @@ const (
 	stateExportPrompt
 	stateConfirm
 	stateWorking
+	stateDrillPrompt
 	stateHelp
 	stateOutput
 )
@@ -1432,6 +1503,7 @@ type model struct {
 	input           textinput.Model
 	filterInput     textinput.Model
 	exportInput     textinput.Model
+	drillInput      textinput.Model
 	filterQuery     string
 	currentSpec     actionSpec
 	inputs          []string
@@ -1497,6 +1569,10 @@ func newModel(client *graphClient) model {
 	ei.CharLimit = 300
 	ei.Width = 72
 	ei.Prompt = "Export CSV path: "
+	di := textinput.New()
+	di.CharLimit = 200
+	di.Width = 72
+	di.Prompt = "Enter rank or exact app name: "
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 
@@ -1562,6 +1638,7 @@ func newModel(client *graphClient) model {
 		input:       ti,
 		filterInput: fi,
 		exportInput: ei,
+		drillInput:  di,
 		viewport:    viewport.New(80, 20),
 		progressCh:  make(chan progressMsg, 64),
 	}
@@ -1839,6 +1916,14 @@ func helpTextForState(state menuState) string {
 			"Enter: Continue to confirm",
 			"Esc: Cancel and return",
 			"?: Open this help",
+		}, "\n")
+	case stateDrillPrompt:
+		return strings.Join([]string{
+			"Drill-Down Help",
+			"",
+			"Enter a rank from the current top-failing report or an exact app name.",
+			"Enter: Run drill-down",
+			"Esc: Cancel",
 		}, "\n")
 	case stateWorking:
 		return strings.Join([]string{
@@ -2137,6 +2222,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.input.Width = minInt(72, maxInt(24, msg.Width-16))
 		m.exportInput.Width = minInt(72, maxInt(24, msg.Width-16))
+		m.drillInput.Width = minInt(72, maxInt(24, msg.Width-16))
 		panelInnerW := maxInt(20, msg.Width-12)
 		panelInnerH := maxInt(6, msg.Height-18)
 		m.viewport.Width = panelInnerW
@@ -2367,6 +2453,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.exportInput, cmd = m.exportInput.Update(msg)
 			return m, cmd
+		case stateDrillPrompt:
+			switch msg.String() {
+			case "esc":
+				m.drillInput.Blur()
+				m.state = stateOutput
+				return m, nil
+			case "enter":
+				appName, err := resolveTopFailingAppSelection(m.drillInput.Value(), m.lastRows)
+				if err != nil {
+					m.setOutput("Error:\n" + err.Error())
+					return m, nil
+				}
+				m.drillInput.Blur()
+				m.lastActionLabel = "Failing App Drill-Down"
+				m.lastActionID = actNone
+				m.state = stateWorking
+				m.output = ""
+				m.progressText = "Starting operation..."
+				return m, tea.Batch(m.spin.Tick, waitProgressCmd(m.progressCh), func() tea.Msg {
+					out, err := m.client.reportAppFailureDetails(context.Background(), appName)
+					return resultMsg{text: out, err: err}
+				})
+			}
+			var cmd tea.Cmd
+			m.drillInput, cmd = m.drillInput.Update(msg)
+			return m, cmd
 		case stateConfirm:
 			switch msg.String() {
 			case "?":
@@ -2460,6 +2572,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Blur()
 				m.state = stateExportPrompt
 				return m, textinput.Blink
+			case "d":
+				if m.lastActionID != actReportTopFailingApps || len(m.lastRows) == 0 {
+					return m, nil
+				}
+				m.drillInput.SetValue("")
+				m.drillInput.Focus()
+				m.state = stateDrillPrompt
+				return m, textinput.Blink
 			}
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
@@ -2490,6 +2610,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	switch m.state {
+	case stateDrillPrompt:
+		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
+			m.styles.subHeader.Render("Top Failing Apps Drill-Down"),
+			m.drillInput.View(),
+			m.styles.hint.Render("Enter rank or exact app name   Esc: cancel"),
+		))
+		return m.styles.app.Render(m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
 	case stateHelp:
 		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
 			m.styles.subHeader.Render("Keyboard Help"),
@@ -2563,6 +2690,9 @@ func (m model) View() string {
 		exportHint := "Up/Down PgUp/PgDn Home/End: scroll   Enter/Esc: return"
 		if len(m.lastHeaders) > 0 && len(m.lastRows) > 0 {
 			exportHint = "Up/Down PgUp/PgDn Home/End: scroll   e: export table   Enter/Esc: return"
+		}
+		if m.lastActionID == actReportTopFailingApps {
+			exportHint = "Up/Down PgUp/PgDn Home/End: scroll   d: drill down   e: export table   Enter/Esc: return"
 		}
 		headerPanel := m.resultSummaryView()
 		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
