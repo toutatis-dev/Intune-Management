@@ -620,6 +620,53 @@ func (g *graphClient) reportComplianceSnapshot(ctx context.Context) (string, err
 	), nil
 }
 
+func classifyWindowsVersion(operatingSystem, osVersion string) string {
+	if !strings.Contains(strings.ToLower(operatingSystem), "windows") {
+		return "Other/Unknown"
+	}
+	parts := strings.Split(osVersion, ".")
+	if len(parts) < 3 {
+		return "Other/Unknown"
+	}
+	build, err := strconv.Atoi(parts[len(parts)-1])
+	if err != nil {
+		return "Other/Unknown"
+	}
+	if build >= 22000 {
+		return "Windows 11"
+	}
+	return "Windows 10"
+}
+
+func (g *graphClient) reportWindowsBreakdown(ctx context.Context) (string, error) {
+	devices, err := g.list(ctx, "/deviceManagement/managedDevices?$select=id,deviceName,operatingSystem,osVersion")
+	if err != nil {
+		return "", err
+	}
+	counts := map[string]int{
+		"Windows 10":    0,
+		"Windows 11":    0,
+		"Other/Unknown": 0,
+	}
+	for _, d := range devices {
+		classification := classifyWindowsVersion(asString(d["operatingSystem"]), asString(d["osVersion"]))
+		counts[classification]++
+	}
+	total := len(devices)
+	rows := make([][]string, 0, 3)
+	for _, name := range []string{"Windows 10", "Windows 11", "Other/Unknown"} {
+		pct := 0.0
+		if total > 0 {
+			pct = (float64(counts[name]) / float64(total)) * 100
+		}
+		rows = append(rows, []string{name, fmt.Sprintf("%d", counts[name]), fmt.Sprintf("%.1f%%", pct)})
+	}
+	return fmt.Sprintf("Windows OS Breakdown\n\nManaged devices: %d\n\n%s",
+		total,
+		renderTable([]string{"Category", "Count", "Percent"}, rows),
+	), nil
+}
+
 func (g *graphClient) reportTopFailingApps(ctx context.Context) (string, error) {
 	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName")
 	if err != nil {
@@ -1116,6 +1163,7 @@ const (
 	actAddAppsCSV
 	actListGroupApps
 	actReportComplianceSnapshot
+	actReportWindowsBreakdown
 	actReportTopFailingApps
 	actReportCsvUsers
 	actReportCsvGroups
@@ -1275,6 +1323,7 @@ func newModel(client *graphClient) model {
 		},
 		repMenu: []menuItem{
 			{label: "Device compliance snapshot", description: "Compliant/noncompliant totals from Intune managed devices", action: actReportComplianceSnapshot},
+			{label: "Windows OS breakdown", description: "Windows 10 vs 11 vs unknown from managed devices", action: actReportWindowsBreakdown},
 			{label: "Top 10 failing app deployments", description: "Rank apps by failed device install statuses", action: actReportTopFailingApps},
 			{label: "CSV validation checks", description: "Run strict quality checks for CSV workflows", next: stateReportCsv},
 			{label: "Back", description: "Return to main menu", next: stateMain},
@@ -1425,6 +1474,8 @@ func actionLabel(id actionID) string {
 		return "List App-Group Assignments"
 	case actReportComplianceSnapshot:
 		return "Device Compliance Snapshot"
+	case actReportWindowsBreakdown:
+		return "Windows OS Breakdown"
 	case actReportTopFailingApps:
 		return "Top 10 Failing App Deployments"
 	case actReportCsvUsers:
@@ -1687,6 +1738,8 @@ func (m model) runActionCmd(spec actionSpec, inputs []string) tea.Cmd {
 			out, err = m.client.listDevices(ctx)
 		case actReportComplianceSnapshot:
 			out, err = m.client.reportComplianceSnapshot(ctx)
+		case actReportWindowsBreakdown:
+			out, err = m.client.reportWindowsBreakdown(ctx)
 		case actReportTopFailingApps:
 			out, err = m.client.reportTopFailingApps(ctx)
 		case actListDevicesGroup:
