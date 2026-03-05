@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -132,39 +133,61 @@ func (g *graphClient) do(ctx context.Context, method, fullURL string, body any) 
 		return nil, err
 	}
 
-	var reader io.Reader
+	var payload []byte
 	if body != nil {
-		b, err := json.Marshal(body)
+		payload, err = json.Marshal(body)
 		if err != nil {
 			return nil, err
 		}
-		reader = bytes.NewReader(b)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, reader)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token.Token)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := g.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	const maxRetries = 4
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		var reader io.Reader
+		if len(payload) > 0 {
+			reader = bytes.NewReader(payload)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, fullURL, reader)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token.Token)
+		req.Header.Set("Accept", "application/json")
+		if len(payload) > 0 {
+			req.Header.Set("Content-Type", "application/json")
+		}
 
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
+		resp, err := g.http.Do(req)
+		if err != nil {
+			if attempt == maxRetries {
+				return nil, err
+			}
+			wait := retryDelay(attempt, "")
+			g.emitProgress(fmt.Sprintf("Transient network error; retrying in %s (%d/%d)", wait, attempt+1, maxRetries))
+			time.Sleep(wait)
+			continue
+		}
 
-	if resp.StatusCode >= 400 {
+		raw, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+
+		if resp.StatusCode < 400 {
+			return raw, nil
+		}
+
+		if shouldRetryStatus(resp.StatusCode) && attempt < maxRetries {
+			wait := retryDelay(attempt, resp.Header.Get("Retry-After"))
+			g.emitProgress(fmt.Sprintf("Graph %d received; retrying in %s (%d/%d)", resp.StatusCode, wait, attempt+1, maxRetries))
+			time.Sleep(wait)
+			continue
+		}
 		return nil, formatGraphError(method, fullURL, resp.Status, raw)
 	}
-	return raw, nil
+
+	return nil, errors.New("graph request failed after retries")
 }
 
 type pageResponse struct {
@@ -192,6 +215,29 @@ func formatGraphError(method, fullURL, status string, raw []byte) error {
 		msg = msg[:500] + "..."
 	}
 	return fmt.Errorf("graph %s %s failed: %s | %s", method, fullURL, status, msg)
+}
+
+func shouldRetryStatus(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func retryDelay(attempt int, retryAfter string) time.Duration {
+	if retryAfter != "" {
+		if secs, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	base := 500 * time.Millisecond
+	d := base * time.Duration(1<<attempt)
+	if d > 8*time.Second {
+		d = 8 * time.Second
+	}
+	return d
 }
 
 func (g *graphClient) list(ctx context.Context, path string) ([]map[string]any, error) {
