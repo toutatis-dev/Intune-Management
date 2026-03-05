@@ -829,14 +829,14 @@ func (g *graphClient) inspectDevice(ctx context.Context, identifier string) (str
 
 func (g *graphClient) inspectApp(ctx context.Context, identifier string) (string, error) {
 	var app map[string]any
-	body, err := g.do(ctx, http.MethodGet, graphBase+"/deviceAppManagement/mobileApps/"+url.PathEscape(identifier)+"?$select=id,displayName,publisher,isAssigned", nil)
+	body, err := g.do(ctx, http.MethodGet, graphBase+"/deviceAppManagement/mobileApps/"+url.PathEscape(identifier)+"?$select=id,displayName,publisher", nil)
 	if err == nil {
 		if err := json.Unmarshal(body, &app); err != nil {
 			return "", err
 		}
 	} else {
 		filter := url.QueryEscape(fmt.Sprintf("displayName eq '%s'", escapeOData(identifier)))
-		items, ferr := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName,publisher,isAssigned&$filter="+filter)
+		items, ferr := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName,publisher&$filter="+filter)
 		if ferr != nil {
 			return "", ferr
 		}
@@ -845,11 +845,18 @@ func (g *graphClient) inspectApp(ctx context.Context, identifier string) (string
 		}
 		app = items[0]
 	}
+
+	assignments, assignErr := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/assignments?$select=id", url.PathEscape(asString(app["id"]))))
+	assignmentCount := "Unavailable"
+	if assignErr == nil {
+		assignmentCount = fmt.Sprintf("%d", len(assignments))
+	}
+
 	return renderInspector("App Inspector", [][2]string{
 		{"Display Name", asString(app["displayName"])},
 		{"Publisher", asString(app["publisher"])},
 		{"Object ID", asString(app["id"])},
-		{"Assigned", asString(app["isAssigned"])},
+		{"Assignment Count", assignmentCount},
 	}), nil
 }
 
@@ -1733,7 +1740,8 @@ func helpTextForState(state menuState) string {
 			"Home/End: Jump to top or bottom",
 			"Enter: Select item",
 			"/: Filter menu options",
-			"q: Back or quit from main menu",
+			"Esc: Back, or quit from main menu",
+			"q: Quit from main menu",
 			"?: Open this help",
 		}, "\n")
 	case stateOutput:
@@ -2060,7 +2068,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.helpReturnState = m.state
 				m.state = stateHelp
 				return m, nil
-			case "ctrl+c", "q":
+			case "ctrl+c":
+				return m, tea.Quit
+			case "q":
+				if m.state == stateMain {
+					return m, tea.Quit
+				}
+			case "esc":
 				if m.state == stateMain {
 					return m, tea.Quit
 				}
@@ -2456,7 +2470,7 @@ func (m model) View() string {
 			m.styles.subHeader.Render(title) + "\n" +
 			m.styles.hint.Render(sub) + "\n\n" +
 			m.styles.panel.Render(menuView) + filterLine + "\n\n" +
-			m.styles.hint.Render("Arrows/jk PgUp/PgDn Home/End: move   /: filter   Enter: select   q: back/quit")
+			m.styles.hint.Render("Arrows/jk PgUp/PgDn Home/End: move   /: filter   Enter: select   Esc: back   q: quit")
 		return m.styles.app.Render(screen)
 	}
 }
