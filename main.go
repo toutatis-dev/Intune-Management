@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -238,6 +239,59 @@ func retryDelay(attempt int, retryAfter string) time.Duration {
 		d = 8 * time.Second
 	}
 	return d
+}
+
+func decodeJWTClaims(token string) (map[string]any, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return nil, errors.New("invalid JWT format")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, err
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, err
+	}
+	return claims, nil
+}
+
+func (g *graphClient) authHealth(ctx context.Context) (string, error) {
+	token, err := g.cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: g.scope})
+	if err != nil {
+		return "", err
+	}
+	claims, err := decodeJWTClaims(token.Token)
+	if err != nil {
+		return "", err
+	}
+	exp := asString(claims["exp"])
+	if exp != "" {
+		if unix, convErr := strconv.ParseInt(exp, 10, 64); convErr == nil {
+			exp = time.Unix(unix, 0).UTC().Format(time.RFC3339)
+		}
+	}
+	effectiveClient := asString(claims["appid"])
+	if effectiveClient == "" {
+		effectiveClient = asString(claims["azp"])
+	}
+	effectiveTenant := asString(claims["tid"])
+	tokenScopes := asString(claims["scp"])
+
+	var b strings.Builder
+	b.WriteString("Auth Health\n\n")
+	fmt.Fprintf(&b, "Configured Client ID: %s\n", g.cfg.ClientID)
+	fmt.Fprintf(&b, "Configured Tenant ID: %s\n", g.cfg.TenantID)
+	fmt.Fprintf(&b, "Token Client ID: %s\n", effectiveClient)
+	fmt.Fprintf(&b, "Token Tenant ID: %s\n", effectiveTenant)
+	fmt.Fprintf(&b, "Token Expires (UTC): %s\n", exp)
+	fmt.Fprintf(&b, "Token Scopes: %s\n\n", tokenScopes)
+	b.WriteString("Requested Scopes:\n")
+	for _, s := range g.scope {
+		fmt.Fprintf(&b, "- %s\n", s)
+	}
+	return b.String(), nil
 }
 
 func (g *graphClient) list(ctx context.Context, path string) ([]map[string]any, error) {
@@ -809,6 +863,7 @@ const (
 	actSetClientID
 	actSetTenantID
 	actViewAuth
+	actAuthHealth
 	actResetAuth
 	actToggleDryRun
 )
@@ -958,6 +1013,7 @@ func newModel(client *graphClient) model {
 			{label: "Set Graph Client ID", description: "App registration client ID used for sign-in", action: actSetClientID},
 			{label: "Set Graph Tenant ID", description: "Tenant GUID/domain or 'common'", action: actSetTenantID},
 			{label: "View Current Auth Config", description: "Display current client and tenant IDs", action: actViewAuth},
+			{label: "Auth Health", description: "Show token tenant/client/scopes and expiry", action: actAuthHealth},
 			{label: "Toggle Dry-Run Mode", description: "When enabled, write operations are simulated only", action: actToggleDryRun},
 			{label: "Reset Auth Defaults", description: "Client ID: Graph PowerShell app, Tenant: common", action: actResetAuth},
 			{label: "Back", description: "Return to main menu", next: stateMain},
@@ -1267,6 +1323,8 @@ func (m model) runActionCmd(spec actionSpec, inputs []string) tea.Cmd {
 			out, err = m.client.listUsers(ctx)
 		case actSearchGroups:
 			out, err = m.client.searchGroups(ctx, inputs[0])
+		case actAuthHealth:
+			out, err = m.client.authHealth(ctx)
 		case actAddUsersCSV:
 			out, err = m.client.addUsersCSV(ctx, inputs[0], inputs[1], m.dryRun)
 		case actListDevices:
