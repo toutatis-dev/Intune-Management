@@ -491,7 +491,7 @@ func readCSV(path string) ([]map[string]string, error) {
 	return out, nil
 }
 
-func (g *graphClient) addUsersCSV(ctx context.Context, csvPath, groupName string) (string, error) {
+func (g *graphClient) addUsersCSV(ctx context.Context, csvPath, groupName string, dryRun bool) (string, error) {
 	rows, err := readCSV(csvPath)
 	if err != nil {
 		return "", err
@@ -519,6 +519,10 @@ func (g *graphClient) addUsersCSV(ctx context.Context, csvPath, groupName string
 		body := map[string]string{
 			"@odata.id": fmt.Sprintf("https://graph.microsoft.com/v1.0/directoryObjects/%s", userID),
 		}
+		if dryRun {
+			fmt.Fprintf(&b, "Would add %s\n", upn)
+			continue
+		}
 		_, err = g.do(ctx, http.MethodPost, fmt.Sprintf("%s/groups/%s/members/$ref", graphBase, groupID), body)
 		if err != nil {
 			fmt.Fprintf(&b, "Failed to add %s: %v\n", upn, err)
@@ -529,7 +533,7 @@ func (g *graphClient) addUsersCSV(ctx context.Context, csvPath, groupName string
 	return b.String(), nil
 }
 
-func (g *graphClient) makeGroupsCSV(ctx context.Context, csvPath string) (string, error) {
+func (g *graphClient) makeGroupsCSV(ctx context.Context, csvPath string, dryRun bool) (string, error) {
 	rows, err := readCSV(csvPath)
 	if err != nil {
 		return "", err
@@ -553,6 +557,10 @@ func (g *graphClient) makeGroupsCSV(ctx context.Context, csvPath string) (string
 			"mailEnabled":     false,
 			"securityEnabled": true,
 		}
+		if dryRun {
+			fmt.Fprintf(&b, "Would create: %s\n", groupName)
+			continue
+		}
 		_, err = g.do(ctx, http.MethodPost, graphBase+"/groups", body)
 		if err != nil {
 			fmt.Fprintf(&b, "Failed to create %s: %v\n", groupName, err)
@@ -563,7 +571,7 @@ func (g *graphClient) makeGroupsCSV(ctx context.Context, csvPath string) (string
 	return b.String(), nil
 }
 
-func (g *graphClient) addAppsCSV(ctx context.Context, csvPath string) (string, error) {
+func (g *graphClient) addAppsCSV(ctx context.Context, csvPath string, dryRun bool) (string, error) {
 	rows, err := readCSV(csvPath)
 	if err != nil {
 		return "", err
@@ -599,6 +607,10 @@ func (g *graphClient) addAppsCSV(ctx context.Context, csvPath string) (string, e
 				"groupId":     groupID,
 			},
 		}
+		if dryRun {
+			fmt.Fprintf(&b, "Would assign %s -> %s\n", appName, groupName)
+			continue
+		}
 		_, err = g.do(ctx, http.MethodPost, fmt.Sprintf("%s/deviceAppManagement/mobileApps/%s/assignments", graphBase, appID), body)
 		if err != nil {
 			fmt.Fprintf(&b, "Failed assignment app=%s group=%s: %v\n", appName, groupName, err)
@@ -609,7 +621,7 @@ func (g *graphClient) addAppsCSV(ctx context.Context, csvPath string) (string, e
 	return b.String(), nil
 }
 
-func (g *graphClient) listGroupApps(ctx context.Context, exportPath string) (string, error) {
+func (g *graphClient) listGroupApps(ctx context.Context, exportPath string, doExport bool) (string, error) {
 	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName")
 	if err != nil {
 		return "", err
@@ -663,21 +675,25 @@ func (g *graphClient) listGroupApps(ctx context.Context, exportPath string) (str
 	}
 	fmt.Fprintf(&b, "App-group assignments: %d\n\n%s", len(rows), renderTable([]string{"App", "Group", "Assignment ID", "Intent"}, tabRows))
 
-	f, err := os.Create(exportPath)
-	if err != nil {
-		return "", err
+	if doExport {
+		f, err := os.Create(exportPath)
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
+		w := csv.NewWriter(f)
+		_ = w.Write([]string{"AppName", "GroupName", "AssignmentId", "Intent"})
+		for _, r := range rows {
+			_ = w.Write([]string{r.AppName, r.GroupName, r.AssignmentID, r.Intent})
+		}
+		w.Flush()
+		if w.Error() != nil {
+			return "", w.Error()
+		}
+		fmt.Fprintf(&b, "\nExported CSV: %s\n", exportPath)
+	} else {
+		fmt.Fprintf(&b, "\nDry-run: would export CSV to %s\n", exportPath)
 	}
-	defer f.Close()
-	w := csv.NewWriter(f)
-	_ = w.Write([]string{"AppName", "GroupName", "AssignmentId", "Intent"})
-	for _, r := range rows {
-		_ = w.Write([]string{r.AppName, r.GroupName, r.AssignmentID, r.Intent})
-	}
-	w.Flush()
-	if w.Error() != nil {
-		return "", w.Error()
-	}
-	fmt.Fprintf(&b, "\nExported CSV: %s\n", exportPath)
 	return b.String(), nil
 }
 
@@ -714,6 +730,7 @@ const (
 	actSetTenantID
 	actViewAuth
 	actResetAuth
+	actToggleDryRun
 )
 
 type menuItem struct {
@@ -776,6 +793,7 @@ type model struct {
 	pendingSpec        actionSpec
 	pendingInputs      []string
 	pendingExportPath  string
+	dryRun             bool
 }
 
 type uiStyles struct {
@@ -854,6 +872,7 @@ func newModel(client *graphClient) model {
 			{label: "Set Graph Client ID", description: "App registration client ID used for sign-in", action: actSetClientID},
 			{label: "Set Graph Tenant ID", description: "Tenant GUID/domain or 'common'", action: actSetTenantID},
 			{label: "View Current Auth Config", description: "Display current client and tenant IDs", action: actViewAuth},
+			{label: "Toggle Dry-Run Mode", description: "When enabled, write operations are simulated only", action: actToggleDryRun},
 			{label: "Reset Auth Defaults", description: "Client ID: Graph PowerShell app, Tenant: common", action: actResetAuth},
 			{label: "Back", description: "Return to main menu", next: stateMain},
 		},
@@ -999,7 +1018,11 @@ func safeInput(inputs []string, idx int) string {
 func (m *model) startConfirmAction(spec actionSpec, inputs []string, cancelState menuState) {
 	m.confirmKind = confirmAction
 	m.confirmTitle = "Confirm Write Operation"
-	m.confirmBody = confirmBodyForAction(spec, inputs)
+	mode := "LIVE mode: this will perform real writes."
+	if m.dryRun {
+		mode = "DRY-RUN mode: this will be simulated (no writes)."
+	}
+	m.confirmBody = mode + "\n\n" + confirmBodyForAction(spec, inputs)
 	m.confirmCancelState = cancelState
 	m.pendingSpec = spec
 	m.pendingInputs = append([]string(nil), inputs...)
@@ -1009,7 +1032,11 @@ func (m *model) startConfirmAction(spec actionSpec, inputs []string, cancelState
 func (m *model) startConfirmExport(path string, cancelState menuState) {
 	m.confirmKind = confirmExport
 	m.confirmTitle = "Confirm File Write"
-	m.confirmBody = "This will write a CSV file.\n\nPath: " + path
+	mode := "LIVE mode: this will write a CSV file."
+	if m.dryRun {
+		mode = "DRY-RUN mode: export will be simulated."
+	}
+	m.confirmBody = mode + "\n\nPath: " + path
 	m.confirmCancelState = cancelState
 	m.pendingExportPath = path
 	m.state = stateConfirm
@@ -1051,7 +1078,11 @@ func specForAction(id actionID) actionSpec {
 }
 
 func (m model) authSummary() string {
-	return fmt.Sprintf("Client ID: %s\nTenant ID: %s", m.client.cfg.ClientID, m.client.cfg.TenantID)
+	mode := "OFF"
+	if m.dryRun {
+		mode = "ON"
+	}
+	return fmt.Sprintf("Client ID: %s\nTenant ID: %s\nDry-Run: %s", m.client.cfg.ClientID, m.client.cfg.TenantID, mode)
 }
 
 func (m *model) applyAuthConfig(cfg authConfig) error {
@@ -1070,7 +1101,17 @@ func (m *model) runLocalAction(id actionID, inputs []string) (string, error, boo
 	switch id {
 	case actViewAuth:
 		return m.authSummary(), nil, true
+	case actToggleDryRun:
+		m.dryRun = !m.dryRun
+		mode := "OFF"
+		if m.dryRun {
+			mode = "ON"
+		}
+		return "Dry-run mode is now " + mode + ".", nil, true
 	case actResetAuth:
+		if m.dryRun {
+			return "Dry-run: would reset auth defaults.\n\n" + m.authSummary(), nil, true
+		}
 		cfg := authConfig{ClientID: defaultClientID, TenantID: "common"}
 		if err := m.applyAuthConfig(cfg); err != nil {
 			return "", err, true
@@ -1083,6 +1124,9 @@ func (m *model) runLocalAction(id actionID, inputs []string) (string, error, boo
 		}
 		cfg := m.client.cfg
 		cfg.ClientID = clientID
+		if m.dryRun {
+			return "Dry-run: would update Graph client ID to:\n" + clientID, nil, true
+		}
 		if err := m.applyAuthConfig(cfg); err != nil {
 			return "", err, true
 		}
@@ -1094,6 +1138,9 @@ func (m *model) runLocalAction(id actionID, inputs []string) (string, error, boo
 		}
 		cfg := m.client.cfg
 		cfg.TenantID = tenantID
+		if m.dryRun {
+			return "Dry-run: would update Graph tenant ID to:\n" + tenantID, nil, true
+		}
 		if err := m.applyAuthConfig(cfg); err != nil {
 			return "", err, true
 		}
@@ -1120,17 +1167,17 @@ func (m model) runActionCmd(spec actionSpec, inputs []string) tea.Cmd {
 		case actSearchGroups:
 			out, err = m.client.searchGroups(ctx, inputs[0])
 		case actAddUsersCSV:
-			out, err = m.client.addUsersCSV(ctx, inputs[0], inputs[1])
+			out, err = m.client.addUsersCSV(ctx, inputs[0], inputs[1], m.dryRun)
 		case actListDevices:
 			out, err = m.client.listDevices(ctx)
 		case actListDevicesGroup:
 			out, err = m.client.listDevicesInGroup(ctx, inputs[0])
 		case actMakeGroupsCSV:
-			out, err = m.client.makeGroupsCSV(ctx, inputs[0])
+			out, err = m.client.makeGroupsCSV(ctx, inputs[0], m.dryRun)
 		case actAddAppsCSV:
-			out, err = m.client.addAppsCSV(ctx, inputs[0])
+			out, err = m.client.addAppsCSV(ctx, inputs[0], m.dryRun)
 		case actListGroupApps:
-			out, err = m.client.listGroupApps(ctx, inputs[0])
+			out, err = m.client.listGroupApps(ctx, inputs[0], !m.dryRun)
 		default:
 			out = "No action."
 		}
@@ -1351,6 +1398,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case confirmExport:
 					path := m.pendingExportPath
 					m.clearConfirm()
+					if m.dryRun {
+						m.setOutput(m.output + "\n\nDry-run: would export CSV to " + path)
+						return m, nil
+					}
 					if err := exportCSV(path, m.lastHeaders, m.lastRows); err != nil {
 						m.setOutput("Error:\nFailed to export CSV: " + err.Error())
 						return m, nil
