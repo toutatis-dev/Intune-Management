@@ -1677,6 +1677,49 @@ func (m model) resultSummaryView() string {
 	return m.styles.panel.Render(strings.Join(lines, "\n"))
 }
 
+func exportBaseDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		cwd, cwdErr := os.Getwd()
+		if cwdErr != nil {
+			return "."
+		}
+		return cwd
+	}
+	return filepath.Dir(exe)
+}
+
+func slugifyName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteRune('-')
+			lastDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "report"
+	}
+	return out
+}
+
+func (m model) defaultExportPath() string {
+	name := slugifyName(m.lastActionLabel)
+	if name == "" {
+		name = "report"
+	}
+	stamp := time.Now().Format("20060102-150405")
+	return filepath.Join(exportBaseDir(), fmt.Sprintf("%s-%s.csv", name, stamp))
+}
+
 func isWriteAction(id actionID) bool {
 	switch id {
 	case actAddUsersCSV, actMakeGroupsCSV, actAddAppsCSV, actSetClientID, actSetTenantID, actResetAuth:
@@ -2204,7 +2247,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(m.lastHeaders) == 0 || len(m.lastRows) == 0 {
 					return m, nil
 				}
-				m.exportInput.SetValue("")
+				m.exportInput.SetValue(m.defaultExportPath())
+				m.exportInput.CursorEnd()
 				m.exportInput.Focus()
 				m.filterInput.Blur()
 				m.input.Blur()
