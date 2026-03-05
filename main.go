@@ -31,6 +31,7 @@ var requiredScopes = []string{
 	"https://graph.microsoft.com/Group.ReadWrite.All",
 	"https://graph.microsoft.com/Device.Read.All",
 	"https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All",
+	"https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All",
 }
 
 const (
@@ -569,6 +570,45 @@ func (g *graphClient) listDevices(ctx context.Context) (string, error) {
 	return fmt.Sprintf("Devices: %d\n\n%s", len(devices), renderTable([]string{"Display Name", "Object ID", "Device ID"}, rows)), nil
 }
 
+func (g *graphClient) reportComplianceSnapshot(ctx context.Context) (string, error) {
+	devices, err := g.list(ctx, "/deviceManagement/managedDevices?$select=id,deviceName,complianceState,operatingSystem,osVersion,lastSyncDateTime")
+	if err != nil {
+		return "", err
+	}
+	counts := map[string]int{
+		"compliant":     0,
+		"noncompliant":  0,
+		"inGracePeriod": 0,
+		"unknown/other": 0,
+	}
+	for _, d := range devices {
+		state := strings.TrimSpace(asString(d["complianceState"]))
+		switch strings.ToLower(state) {
+		case "compliant":
+			counts["compliant"]++
+		case "noncompliant":
+			counts["noncompliant"]++
+		case "ingraceperiod":
+			counts["inGracePeriod"]++
+		default:
+			counts["unknown/other"]++
+		}
+	}
+	total := len(devices)
+	rows := [][]string{}
+	for _, k := range []string{"compliant", "noncompliant", "inGracePeriod", "unknown/other"} {
+		pct := 0.0
+		if total > 0 {
+			pct = (float64(counts[k]) / float64(total)) * 100
+		}
+		rows = append(rows, []string{k, fmt.Sprintf("%d", counts[k]), fmt.Sprintf("%.1f%%", pct)})
+	}
+	return fmt.Sprintf("Device Compliance Snapshot\n\nManaged devices: %d\n\n%s",
+		total,
+		renderTable([]string{"Compliance State", "Count", "Percent"}, rows),
+	), nil
+}
+
 func (g *graphClient) listDevicesInGroup(ctx context.Context, groupName string) (string, error) {
 	group, err := g.findGroupByDisplayName(ctx, groupName)
 	if err != nil {
@@ -623,6 +663,169 @@ func readCSV(path string) ([]map[string]string, error) {
 		out = append(out, item)
 	}
 	return out, nil
+}
+
+type csvIssue struct {
+	Severity string
+	Row      int
+	Field    string
+	Code     string
+	Message  string
+}
+
+type csvValidationResult struct {
+	FilePath string
+	Rows     int
+	Errors   int
+	Warnings int
+	Issues   []csvIssue
+	Pass     bool
+}
+
+func validateCSVStrict(path string, requiredHeaders, keyColumns []string) (csvValidationResult, error) {
+	res := csvValidationResult{FilePath: path, Pass: true}
+	f, err := os.Open(path)
+	if err != nil {
+		return res, err
+	}
+	defer f.Close()
+
+	r := csv.NewReader(f)
+	headers, err := r.Read()
+	if err != nil {
+		return res, err
+	}
+	headerMap := map[string]int{}
+	for i, h := range headers {
+		headerMap[strings.TrimSpace(h)] = i
+	}
+
+	for _, req := range requiredHeaders {
+		if _, ok := headerMap[req]; !ok {
+			res.Issues = append(res.Issues, csvIssue{
+				Severity: "Error", Row: 1, Field: req, Code: "MISSING_HEADER",
+				Message: "Required header is missing",
+			})
+		}
+	}
+	if len(res.Issues) > 0 {
+		res.Errors = len(res.Issues)
+		res.Pass = false
+		return res, nil
+	}
+
+	for _, h := range headers {
+		trim := strings.TrimSpace(h)
+		if trim != h {
+			res.Issues = append(res.Issues, csvIssue{
+				Severity: "Warning", Row: 1, Field: h, Code: "HEADER_WHITESPACE",
+				Message: "Header has leading/trailing whitespace",
+			})
+		}
+	}
+
+	seen := map[string]int{}
+	rowNum := 1
+	for {
+		row, readErr := r.Read()
+		if readErr == io.EOF {
+			break
+		}
+		rowNum++
+		if readErr != nil {
+			res.Issues = append(res.Issues, csvIssue{
+				Severity: "Error", Row: rowNum, Field: "", Code: "MALFORMED_ROW",
+				Message: readErr.Error(),
+			})
+			continue
+		}
+		res.Rows++
+		keyParts := make([]string, 0, len(keyColumns))
+		for _, req := range requiredHeaders {
+			idx := headerMap[req]
+			val := ""
+			if idx < len(row) {
+				val = strings.TrimSpace(row[idx])
+			}
+			if val == "" {
+				res.Issues = append(res.Issues, csvIssue{
+					Severity: "Error", Row: rowNum, Field: req, Code: "MISSING_REQUIRED_VALUE",
+					Message: "Required value is empty",
+				})
+			}
+		}
+		for _, k := range keyColumns {
+			idx := headerMap[k]
+			val := ""
+			if idx < len(row) {
+				val = strings.ToLower(strings.TrimSpace(row[idx]))
+			}
+			keyParts = append(keyParts, val)
+		}
+		key := strings.Join(keyParts, "|")
+		if key != "" {
+			if first, exists := seen[key]; exists {
+				res.Issues = append(res.Issues, csvIssue{
+					Severity: "Error", Row: rowNum, Field: strings.Join(keyColumns, "+"), Code: "DUPLICATE_KEY",
+					Message: fmt.Sprintf("Duplicate key; first seen at row %d", first),
+				})
+			} else {
+				seen[key] = rowNum
+			}
+		}
+	}
+
+	for _, i := range res.Issues {
+		if i.Severity == "Error" {
+			res.Errors++
+		} else if i.Severity == "Warning" {
+			res.Warnings++
+		}
+	}
+	res.Pass = res.Errors == 0
+	return res, nil
+}
+
+func formatValidationReport(title string, res csvValidationResult) string {
+	status := "PASS"
+	if !res.Pass {
+		status = "FAIL"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n\nFile: %s\nRows: %d\nErrors: %d\nWarnings: %d\nStatus: %s\n\n",
+		title, res.FilePath, res.Rows, res.Errors, res.Warnings, status)
+	if len(res.Issues) == 0 {
+		b.WriteString("No validation issues found.\n")
+		return b.String()
+	}
+	rows := make([][]string, 0, len(res.Issues))
+	for _, issue := range res.Issues {
+		rows = append(rows, []string{
+			issue.Severity,
+			fmt.Sprintf("%d", issue.Row),
+			issue.Field,
+			issue.Code,
+			issue.Message,
+		})
+	}
+	b.WriteString(renderTable([]string{"Severity", "Row", "Field", "Code", "Message"}, rows))
+	return b.String()
+}
+
+func validateForAction(spec actionSpec, inputs []string) (csvValidationResult, bool, error) {
+	switch spec.id {
+	case actAddUsersCSV, actReportCsvUsers:
+		res, err := validateCSVStrict(inputs[0], []string{"User_Principal_Name"}, []string{"User_Principal_Name"})
+		return res, true, err
+	case actMakeGroupsCSV, actReportCsvGroups:
+		res, err := validateCSVStrict(inputs[0], []string{"Group_Name"}, []string{"Group_Name"})
+		return res, true, err
+	case actAddAppsCSV, actReportCsvApps:
+		res, err := validateCSVStrict(inputs[0], []string{"Group_Name", "App_Name"}, []string{"Group_Name", "App_Name"})
+		return res, true, err
+	default:
+		return csvValidationResult{}, false, nil
+	}
 }
 
 func (g *graphClient) addUsersCSV(ctx context.Context, csvPath, groupName string, dryRun bool) (string, error) {
@@ -817,6 +1020,7 @@ const (
 	stateMain menuState = iota
 	stateUsersGroups
 	stateDevicesApps
+	stateReports
 	stateSettings
 	stateMenuFilter
 	stateInput
@@ -840,6 +1044,10 @@ const (
 	actMakeGroupsCSV
 	actAddAppsCSV
 	actListGroupApps
+	actReportComplianceSnapshot
+	actReportCsvUsers
+	actReportCsvGroups
+	actReportCsvApps
 	actSetClientID
 	actSetTenantID
 	actViewAuth
@@ -889,6 +1097,7 @@ type model struct {
 	mainMenu []menuItem
 	userMenu []menuItem
 	devMenu  []menuItem
+	repMenu  []menuItem
 	cfgMenu  []menuItem
 
 	spin        spinner.Model
@@ -970,6 +1179,7 @@ func newModel(client *graphClient) model {
 		mainMenu: []menuItem{
 			{label: "Manage Users and Groups", description: "List users, search groups, and bulk add members from CSV", next: stateUsersGroups},
 			{label: "Manage Devices and Groups", description: "List devices, create groups, and manage app assignments", next: stateDevicesApps},
+			{label: "Reports", description: "Read-only compliance and CSV quality analytics", next: stateReports},
 			{label: "Settings", description: "Set Graph client and tenant IDs", next: stateSettings},
 			{label: "Quit", description: "Exit the tool", action: actNone, next: -1},
 		},
@@ -987,6 +1197,13 @@ func newModel(client *graphClient) model {
 			{label: "Create groups from CSV", description: "CSV header required: Group_Name", action: actMakeGroupsCSV},
 			{label: "Assign apps by CSV", description: "CSV headers required: Group_Name, App_Name", action: actAddAppsCSV},
 			{label: "List app-group assignments", description: "Show deployments in a table (press e in results to export)", action: actListGroupApps},
+			{label: "Back", description: "Return to main menu", next: stateMain},
+		},
+		repMenu: []menuItem{
+			{label: "Device compliance snapshot", description: "Compliant/noncompliant totals from Intune managed devices", action: actReportComplianceSnapshot},
+			{label: "Validate Users->Group CSV", description: "Strict quality checks for User_Principal_Name format", action: actReportCsvUsers},
+			{label: "Validate Create-Groups CSV", description: "Strict quality checks for Group_Name format", action: actReportCsvGroups},
+			{label: "Validate App-Assignment CSV", description: "Strict quality checks for Group_Name + App_Name format", action: actReportCsvApps},
 			{label: "Back", description: "Return to main menu", next: stateMain},
 		},
 		cfgMenu: []menuItem{
@@ -1018,6 +1235,8 @@ func (m model) menu() []menuItem {
 		return m.userMenu
 	case stateDevicesApps:
 		return m.devMenu
+	case stateReports:
+		return m.repMenu
 	case stateSettings:
 		return m.cfgMenu
 	default:
@@ -1194,6 +1413,12 @@ func specForAction(id actionID) actionSpec {
 		return actionSpec{id: id, prompts: []string{"Enter CSV path (header: Group_Name)"}}
 	case actAddAppsCSV:
 		return actionSpec{id: id, prompts: []string{"Enter CSV path (headers: Group_Name, App_Name)"}}
+	case actReportCsvUsers:
+		return actionSpec{id: id, prompts: []string{"Enter CSV path for Users->Group validation"}}
+	case actReportCsvGroups:
+		return actionSpec{id: id, prompts: []string{"Enter CSV path for Create-Groups validation"}}
+	case actReportCsvApps:
+		return actionSpec{id: id, prompts: []string{"Enter CSV path for App-Assignment validation"}}
 	case actSetClientID:
 		return actionSpec{id: id, prompts: []string{"Enter Graph client ID"}}
 	case actSetTenantID:
@@ -1305,6 +1530,8 @@ func (m model) runActionCmd(spec actionSpec, inputs []string) tea.Cmd {
 			out, err = m.client.addUsersCSV(ctx, inputs[0], inputs[1], m.dryRun)
 		case actListDevices:
 			out, err = m.client.listDevices(ctx)
+		case actReportComplianceSnapshot:
+			out, err = m.client.reportComplianceSnapshot(ctx)
 		case actListDevicesGroup:
 			out, err = m.client.listDevicesInGroup(ctx, inputs[0])
 		case actMakeGroupsCSV:
@@ -1313,6 +1540,24 @@ func (m model) runActionCmd(spec actionSpec, inputs []string) tea.Cmd {
 			out, err = m.client.addAppsCSV(ctx, inputs[0], m.dryRun)
 		case actListGroupApps:
 			out, err = m.client.listGroupApps(ctx)
+		case actReportCsvUsers:
+			if res, ok, verr := validateForAction(spec, inputs); verr != nil {
+				err = verr
+			} else if ok {
+				out = formatValidationReport("CSV Quality Report - Users to Group", res)
+			}
+		case actReportCsvGroups:
+			if res, ok, verr := validateForAction(spec, inputs); verr != nil {
+				err = verr
+			} else if ok {
+				out = formatValidationReport("CSV Quality Report - Create Groups", res)
+			}
+		case actReportCsvApps:
+			if res, ok, verr := validateForAction(spec, inputs); verr != nil {
+				err = verr
+			} else if ok {
+				out = formatValidationReport("CSV Quality Report - App Assignments", res)
+			}
 		default:
 			out = "No action."
 		}
@@ -1338,7 +1583,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		switch m.state {
-		case stateMain, stateUsersGroups, stateDevicesApps, stateSettings:
+		case stateMain, stateUsersGroups, stateDevicesApps, stateReports, stateSettings:
 			visible := m.visibleMenu()
 			switch msg.String() {
 			case "ctrl+c", "q":
@@ -1422,7 +1667,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.resetMenuPosition(stateMain)
 					return m, nil
 				}
-				if item.next == stateUsersGroups || item.next == stateDevicesApps || item.next == stateSettings {
+				if item.next == stateUsersGroups || item.next == stateDevicesApps || item.next == stateReports || item.next == stateSettings {
 					m.resetMenuPosition(item.next)
 					return m, nil
 				}
@@ -1461,6 +1706,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.input.Blur()
+				if res, ok, verr := validateForAction(m.currentSpec, m.inputs); ok {
+					if verr != nil {
+						m.setOutput("Error:\nCSV validation failed to run: " + verr.Error())
+						return m, nil
+					}
+					if !res.Pass {
+						m.setOutput(formatValidationReport("CSV Validation Failed (Write Blocked)", res))
+						return m, nil
+					}
+				}
 				if isWriteAction(m.currentSpec.id) {
 					m.startConfirmAction(m.currentSpec, m.inputs, stateInput)
 					return m, nil
@@ -1676,6 +1931,9 @@ func (m model) View() string {
 		} else if m.state == stateDevicesApps {
 			title = "Devices and Applications"
 			sub = "Device inventory and Intune app assignment workflows"
+		} else if m.state == stateReports {
+			title = "Reports"
+			sub = "Read-only analytics and strict CSV quality checks"
 		} else if m.state == stateSettings {
 			title = "Settings"
 			sub = "Authentication configuration for Microsoft Graph"
