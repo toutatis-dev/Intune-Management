@@ -161,7 +161,7 @@ func (g *graphClient) do(ctx context.Context, method, fullURL string, body any) 
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("graph %s %s failed: %s - %s", method, fullURL, resp.Status, string(raw))
+		return nil, formatGraphError(method, fullURL, resp.Status, raw)
 	}
 	return raw, nil
 }
@@ -169,6 +169,28 @@ func (g *graphClient) do(ctx context.Context, method, fullURL string, body any) 
 type pageResponse struct {
 	Value    []map[string]any `json:"value"`
 	NextLink string           `json:"@odata.nextLink"`
+}
+
+type graphErrorEnvelope struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func formatGraphError(method, fullURL, status string, raw []byte) error {
+	var env graphErrorEnvelope
+	if err := json.Unmarshal(raw, &env); err == nil && env.Error.Code != "" {
+		return fmt.Errorf("graph %s %s failed: %s | %s: %s", method, fullURL, status, env.Error.Code, env.Error.Message)
+	}
+	msg := strings.TrimSpace(string(raw))
+	if msg == "" {
+		return fmt.Errorf("graph %s %s failed: %s", method, fullURL, status)
+	}
+	if len(msg) > 500 {
+		msg = msg[:500] + "..."
+	}
+	return fmt.Errorf("graph %s %s failed: %s | %s", method, fullURL, status, msg)
 }
 
 func (g *graphClient) list(ctx context.Context, path string) ([]map[string]any, error) {
