@@ -1079,6 +1079,68 @@ func validateForAction(spec actionSpec, inputs []string) (csvValidationResult, b
 	}
 }
 
+func previewForAction(spec actionSpec, inputs []string) (string, bool, error) {
+	switch spec.id {
+	case actAddUsersCSV:
+		rows, err := readCSV(inputs[0])
+		if err != nil {
+			return "", true, err
+		}
+		sample := make([][]string, 0, minInt(10, len(rows)))
+		for i, row := range rows {
+			if i >= 10 {
+				break
+			}
+			sample = append(sample, []string{row["User_Principal_Name"]})
+		}
+		return fmt.Sprintf("Preview - Bulk Add Users\n\nCSV: %s\nTarget Group: %s\nRows: %d\nShowing first %d rows\n\n%s",
+			inputs[0],
+			inputs[1],
+			len(rows),
+			len(sample),
+			renderTable([]string{"User Principal Name"}, sample),
+		), true, nil
+	case actMakeGroupsCSV:
+		rows, err := readCSV(inputs[0])
+		if err != nil {
+			return "", true, err
+		}
+		sample := make([][]string, 0, minInt(10, len(rows)))
+		for i, row := range rows {
+			if i >= 10 {
+				break
+			}
+			sample = append(sample, []string{row["Group_Name"]})
+		}
+		return fmt.Sprintf("Preview - Create Groups\n\nCSV: %s\nRows: %d\nShowing first %d rows\n\n%s",
+			inputs[0],
+			len(rows),
+			len(sample),
+			renderTable([]string{"Group Name"}, sample),
+		), true, nil
+	case actAddAppsCSV:
+		rows, err := readCSV(inputs[0])
+		if err != nil {
+			return "", true, err
+		}
+		sample := make([][]string, 0, minInt(10, len(rows)))
+		for i, row := range rows {
+			if i >= 10 {
+				break
+			}
+			sample = append(sample, []string{row["Group_Name"], row["App_Name"]})
+		}
+		return fmt.Sprintf("Preview - Assign Apps\n\nCSV: %s\nRows: %d\nShowing first %d rows\n\n%s",
+			inputs[0],
+			len(rows),
+			len(sample),
+			renderTable([]string{"Group Name", "App Name"}, sample),
+		), true, nil
+	default:
+		return "", false, nil
+	}
+}
+
 func (g *graphClient) addUsersCSV(ctx context.Context, csvPath, groupName string, dryRun bool) (string, error) {
 	rows, err := readCSV(csvPath)
 	if err != nil {
@@ -1277,6 +1339,7 @@ const (
 	stateSettings
 	stateMenuFilter
 	stateInput
+	statePreview
 	stateExportPrompt
 	stateConfirm
 	stateWorking
@@ -1388,6 +1451,7 @@ type model struct {
 	progressCh         chan progressMsg
 	progressText       string
 	helpReturnState    menuState
+	lastActionID       actionID
 }
 
 type uiStyles struct {
@@ -1686,6 +1750,19 @@ func (m model) resultSummaryView() string {
 	return m.styles.panel.Render(strings.Join(lines, "\n"))
 }
 
+func (m *model) setPreview(text string) {
+	m.output = text
+	m.viewport.SetContent(text)
+	m.viewport.GotoTop()
+	m.lastHeaders = nil
+	m.lastRows = nil
+	if h, r, ok := parseTableFromText(text); ok {
+		m.lastHeaders = h
+		m.lastRows = r
+	}
+	m.state = statePreview
+}
+
 func exportBaseDir() string {
 	exe, err := os.Executable()
 	if err != nil {
@@ -1750,7 +1827,17 @@ func helpTextForState(state menuState) string {
 			"",
 			"Up/Down PgUp/PgDn Home/End: Scroll result",
 			"e: Export current table when available",
+			"d: Drill into top failing apps when available",
 			"Enter/Esc: Return to previous menu",
+			"?: Open this help",
+		}, "\n")
+	case statePreview:
+		return strings.Join([]string{
+			"Preview Help",
+			"",
+			"Up/Down PgUp/PgDn Home/End: Scroll preview",
+			"Enter: Continue to confirm",
+			"Esc: Cancel and return",
 			"?: Open this help",
 		}, "\n")
 	case stateWorking:
@@ -2123,6 +2210,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if item.action != actNone {
 					spec := specForAction(item.action)
 					m.lastActionLabel = actionLabel(spec.id)
+					m.lastActionID = spec.id
 					m.lastMenuState = m.state
 					if len(spec.prompts) == 0 {
 						if isWriteAction(spec.id) {
@@ -2205,6 +2293,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 				}
+				if preview, ok, perr := previewForAction(m.currentSpec, m.inputs); ok {
+					if perr != nil {
+						m.setOutput("Error:\nPreview failed: " + perr.Error())
+						return m, nil
+					}
+					m.pendingSpec = m.currentSpec
+					m.pendingInputs = append([]string(nil), m.inputs...)
+					m.setPreview(preview)
+					return m, nil
+				}
 				if isWriteAction(m.currentSpec.id) {
 					m.startConfirmAction(m.currentSpec, m.inputs, stateInput)
 					return m, nil
@@ -2224,6 +2322,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
+			return m, cmd
+		case statePreview:
+			switch msg.String() {
+			case "?":
+				m.helpReturnState = m.state
+				m.state = stateHelp
+				return m, nil
+			case "esc":
+				m.returnToLastMenu()
+				m.output = ""
+				m.viewport.SetContent("")
+				m.viewport.GotoTop()
+				return m, nil
+			case "enter":
+				spec := m.pendingSpec
+				inputs := append([]string(nil), m.pendingInputs...)
+				m.startConfirmAction(spec, inputs, statePreview)
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
 			return m, cmd
 		case stateExportPrompt:
 			switch msg.String() {
@@ -2409,6 +2528,19 @@ func (m model) View() string {
 			m.styles.hint.Render("Enter: continue   Esc: cancel"),
 		))
 		return m.styles.app.Render(m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
+	case statePreview:
+		prefix := m.styles.subHeader.Render("Preview Before Write")
+		content := m.output
+		if m.vpReady {
+			content = m.viewport.View()
+		}
+		headerPanel := m.resultSummaryView()
+		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
+			prefix,
+			content,
+			m.styles.hint.Render("Up/Down PgUp/PgDn Home/End: scroll   Enter: continue   Esc: cancel"),
+		))
+		return m.styles.app.Render(m.styles.header.Render(" Intune Management Tool ") + "\n\n" + headerPanel + "\n\n" + body)
 	case stateWorking:
 		progress := m.progressText
 		if strings.TrimSpace(progress) == "" {
