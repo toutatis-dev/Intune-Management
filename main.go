@@ -20,6 +20,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -115,6 +116,15 @@ func newGraphClientWithConfig(cfg authConfig) (*graphClient, error) {
 		TenantID: cfg.TenantID,
 		UserPrompt: func(ctx context.Context, message azidentity.DeviceCodeMessage) error {
 			fmt.Printf("\n%s\n\n", message.Message)
+			if strings.TrimSpace(message.UserCode) != "" {
+				fmt.Printf("Device code: %s\n", message.UserCode)
+				if err := clipboard.WriteAll(message.UserCode); err == nil {
+					fmt.Println("Copied device code to clipboard.")
+				} else {
+					fmt.Println("Could not copy device code to clipboard; copy it manually from above.")
+				}
+			}
+			fmt.Println()
 			return nil
 		},
 	})
