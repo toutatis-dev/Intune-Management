@@ -726,6 +726,133 @@ func (g *graphClient) reportTopFailingApps(ctx context.Context) (string, error) 
 	), nil
 }
 
+func renderInspector(title string, values [][2]string) string {
+	rows := make([][]string, 0, len(values))
+	for _, pair := range values {
+		rows = append(rows, []string{pair[0], pair[1]})
+	}
+	return fmt.Sprintf("%s\n\n%s", title, renderTable([]string{"Field", "Value"}, rows))
+}
+
+func (g *graphClient) inspectUser(ctx context.Context, identifier string) (string, error) {
+	var user map[string]any
+	if strings.Contains(identifier, "@") {
+		filter := url.QueryEscape(fmt.Sprintf("userPrincipalName eq '%s'", escapeOData(identifier)))
+		items, err := g.list(ctx, "/users?$select=id,displayName,userPrincipalName,accountEnabled&$filter="+filter)
+		if err != nil {
+			return "", err
+		}
+		if len(items) == 0 {
+			return "", errors.New("user not found")
+		}
+		user = items[0]
+	} else {
+		body, err := g.do(ctx, http.MethodGet, graphBase+"/users/"+url.PathEscape(identifier)+"?$select=id,displayName,userPrincipalName,accountEnabled", nil)
+		if err == nil {
+			if err := json.Unmarshal(body, &user); err != nil {
+				return "", err
+			}
+		} else {
+			filter := url.QueryEscape(fmt.Sprintf("displayName eq '%s'", escapeOData(identifier)))
+			items, ferr := g.list(ctx, "/users?$select=id,displayName,userPrincipalName,accountEnabled&$filter="+filter)
+			if ferr != nil {
+				return "", ferr
+			}
+			if len(items) == 0 {
+				return "", errors.New("user not found")
+			}
+			user = items[0]
+		}
+	}
+	return renderInspector("User Inspector", [][2]string{
+		{"Display Name", asString(user["displayName"])},
+		{"UPN", asString(user["userPrincipalName"])},
+		{"Object ID", asString(user["id"])},
+		{"Enabled", asString(user["accountEnabled"])},
+	}), nil
+}
+
+func (g *graphClient) inspectGroup(ctx context.Context, identifier string) (string, error) {
+	var group map[string]any
+	body, err := g.do(ctx, http.MethodGet, graphBase+"/groups/"+url.PathEscape(identifier)+"?$select=id,displayName,description,mailNickname,securityEnabled,mailEnabled", nil)
+	if err == nil {
+		if err := json.Unmarshal(body, &group); err != nil {
+			return "", err
+		}
+	} else {
+		filter := url.QueryEscape(fmt.Sprintf("displayName eq '%s'", escapeOData(identifier)))
+		items, ferr := g.list(ctx, "/groups?$select=id,displayName,description,mailNickname,securityEnabled,mailEnabled&$filter="+filter)
+		if ferr != nil {
+			return "", ferr
+		}
+		if len(items) == 0 {
+			return "", errors.New("group not found")
+		}
+		group = items[0]
+	}
+	return renderInspector("Group Inspector", [][2]string{
+		{"Display Name", asString(group["displayName"])},
+		{"Description", asString(group["description"])},
+		{"Object ID", asString(group["id"])},
+		{"Mail Nickname", asString(group["mailNickname"])},
+		{"Security Enabled", asString(group["securityEnabled"])},
+		{"Mail Enabled", asString(group["mailEnabled"])},
+	}), nil
+}
+
+func (g *graphClient) inspectDevice(ctx context.Context, identifier string) (string, error) {
+	var device map[string]any
+	body, err := g.do(ctx, http.MethodGet, graphBase+"/devices/"+url.PathEscape(identifier)+"?$select=id,displayName,deviceId,operatingSystem,accountEnabled", nil)
+	if err == nil {
+		if err := json.Unmarshal(body, &device); err != nil {
+			return "", err
+		}
+	} else {
+		filter := url.QueryEscape(fmt.Sprintf("displayName eq '%s'", escapeOData(identifier)))
+		items, ferr := g.list(ctx, "/devices?$select=id,displayName,deviceId,operatingSystem,accountEnabled&$filter="+filter)
+		if ferr != nil {
+			return "", ferr
+		}
+		if len(items) == 0 {
+			return "", errors.New("device not found")
+		}
+		device = items[0]
+	}
+	return renderInspector("Device Inspector", [][2]string{
+		{"Display Name", asString(device["displayName"])},
+		{"Object ID", asString(device["id"])},
+		{"Device ID", asString(device["deviceId"])},
+		{"Operating System", asString(device["operatingSystem"])},
+		{"Enabled", asString(device["accountEnabled"])},
+	}), nil
+}
+
+func (g *graphClient) inspectApp(ctx context.Context, identifier string) (string, error) {
+	var app map[string]any
+	body, err := g.do(ctx, http.MethodGet, graphBase+"/deviceAppManagement/mobileApps/"+url.PathEscape(identifier)+"?$select=id,displayName,publisher,isAssigned", nil)
+	if err == nil {
+		if err := json.Unmarshal(body, &app); err != nil {
+			return "", err
+		}
+	} else {
+		filter := url.QueryEscape(fmt.Sprintf("displayName eq '%s'", escapeOData(identifier)))
+		items, ferr := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName,publisher,isAssigned&$filter="+filter)
+		if ferr != nil {
+			return "", ferr
+		}
+		if len(items) == 0 {
+			return "", errors.New("app not found")
+		}
+		app = items[0]
+	}
+	return renderInspector("App Inspector", [][2]string{
+		{"Display Name", asString(app["displayName"])},
+		{"Publisher", asString(app["publisher"])},
+		{"Object ID", asString(app["id"])},
+		{"Assigned", asString(app["isAssigned"])},
+	}), nil
+}
+
 func (g *graphClient) listDevicesInGroup(ctx context.Context, groupName string) (string, error) {
 	group, err := g.findGroupByDisplayName(ctx, groupName)
 	if err != nil {
@@ -1139,6 +1266,7 @@ const (
 	stateDevicesApps
 	stateReports
 	stateReportCsv
+	stateReportInspect
 	stateSettings
 	stateMenuFilter
 	stateInput
@@ -1168,6 +1296,10 @@ const (
 	actReportCsvUsers
 	actReportCsvGroups
 	actReportCsvApps
+	actInspectUser
+	actInspectGroup
+	actInspectDevice
+	actInspectApp
 	actSetClientID
 	actSetTenantID
 	actViewAuth
@@ -1214,12 +1346,13 @@ type model struct {
 	height        int
 	lastMenuState menuState
 
-	mainMenu   []menuItem
-	userMenu   []menuItem
-	devMenu    []menuItem
-	repMenu    []menuItem
-	repCSVMenu []menuItem
-	cfgMenu    []menuItem
+	mainMenu       []menuItem
+	userMenu       []menuItem
+	devMenu        []menuItem
+	repMenu        []menuItem
+	repCSVMenu     []menuItem
+	repInspectMenu []menuItem
+	cfgMenu        []menuItem
 
 	spin            spinner.Model
 	viewport        viewport.Model
@@ -1325,6 +1458,7 @@ func newModel(client *graphClient) model {
 			{label: "Device compliance snapshot", description: "Compliant/noncompliant totals from Intune managed devices", action: actReportComplianceSnapshot},
 			{label: "Windows OS breakdown", description: "Windows 10 vs 11 vs unknown from managed devices", action: actReportWindowsBreakdown},
 			{label: "Top 10 failing app deployments", description: "Rank apps by failed device install statuses", action: actReportTopFailingApps},
+			{label: "Object inspector", description: "Lookup one user, group, device, or app by ID or name", next: stateReportInspect},
 			{label: "CSV validation checks", description: "Run strict quality checks for CSV workflows", next: stateReportCsv},
 			{label: "Back", description: "Return to main menu", next: stateMain},
 		},
@@ -1332,6 +1466,13 @@ func newModel(client *graphClient) model {
 			{label: "Validate Users->Group CSV", description: "Strict quality checks for User_Principal_Name format", action: actReportCsvUsers},
 			{label: "Validate Create-Groups CSV", description: "Strict quality checks for Group_Name format", action: actReportCsvGroups},
 			{label: "Validate App-Assignment CSV", description: "Strict quality checks for Group_Name + App_Name format", action: actReportCsvApps},
+			{label: "Back", description: "Return to Reports menu", next: stateReports},
+		},
+		repInspectMenu: []menuItem{
+			{label: "Inspect user", description: "Lookup by object ID, UPN, or exact display name", action: actInspectUser},
+			{label: "Inspect group", description: "Lookup by object ID or exact display name", action: actInspectGroup},
+			{label: "Inspect device", description: "Lookup by object ID or exact display name", action: actInspectDevice},
+			{label: "Inspect app", description: "Lookup by app ID or exact display name", action: actInspectApp},
 			{label: "Back", description: "Return to Reports menu", next: stateReports},
 		},
 		cfgMenu: []menuItem{
@@ -1367,6 +1508,8 @@ func (m model) menu() []menuItem {
 		return m.repMenu
 	case stateReportCsv:
 		return m.repCSVMenu
+	case stateReportInspect:
+		return m.repInspectMenu
 	case stateSettings:
 		return m.cfgMenu
 	default:
@@ -1478,6 +1621,14 @@ func actionLabel(id actionID) string {
 		return "Windows OS Breakdown"
 	case actReportTopFailingApps:
 		return "Top 10 Failing App Deployments"
+	case actInspectUser:
+		return "Inspect User"
+	case actInspectGroup:
+		return "Inspect Group"
+	case actInspectDevice:
+		return "Inspect Device"
+	case actInspectApp:
+		return "Inspect App"
 	case actReportCsvUsers:
 		return "Validate Users->Group CSV"
 	case actReportCsvGroups:
@@ -1625,6 +1776,14 @@ func specForAction(id actionID) actionSpec {
 		return actionSpec{id: id, prompts: []string{"Enter CSV path for Create-Groups validation"}}
 	case actReportCsvApps:
 		return actionSpec{id: id, prompts: []string{"Enter CSV path for App-Assignment validation"}}
+	case actInspectUser:
+		return actionSpec{id: id, prompts: []string{"Enter user object ID, UPN, or exact display name"}}
+	case actInspectGroup:
+		return actionSpec{id: id, prompts: []string{"Enter group object ID or exact display name"}}
+	case actInspectDevice:
+		return actionSpec{id: id, prompts: []string{"Enter device object ID or exact display name"}}
+	case actInspectApp:
+		return actionSpec{id: id, prompts: []string{"Enter app ID or exact display name"}}
 	case actSetClientID:
 		return actionSpec{id: id, prompts: []string{"Enter Graph client ID"}}
 	case actSetTenantID:
@@ -1742,6 +1901,14 @@ func (m model) runActionCmd(spec actionSpec, inputs []string) tea.Cmd {
 			out, err = m.client.reportWindowsBreakdown(ctx)
 		case actReportTopFailingApps:
 			out, err = m.client.reportTopFailingApps(ctx)
+		case actInspectUser:
+			out, err = m.client.inspectUser(ctx, inputs[0])
+		case actInspectGroup:
+			out, err = m.client.inspectGroup(ctx, inputs[0])
+		case actInspectDevice:
+			out, err = m.client.inspectDevice(ctx, inputs[0])
+		case actInspectApp:
+			out, err = m.client.inspectApp(ctx, inputs[0])
 		case actListDevicesGroup:
 			out, err = m.client.listDevicesInGroup(ctx, inputs[0])
 		case actMakeGroupsCSV:
@@ -1793,7 +1960,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		switch m.state {
-		case stateMain, stateUsersGroups, stateDevicesApps, stateReports, stateReportCsv, stateSettings:
+		case stateMain, stateUsersGroups, stateDevicesApps, stateReports, stateReportCsv, stateReportInspect, stateSettings:
 			visible := m.visibleMenu()
 			switch msg.String() {
 			case "ctrl+c", "q":
@@ -1878,7 +2045,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.resetMenuPosition(stateMain)
 					return m, nil
 				}
-				if item.next == stateUsersGroups || item.next == stateDevicesApps || item.next == stateReports || item.next == stateReportCsv || item.next == stateSettings {
+				if item.next == stateUsersGroups || item.next == stateDevicesApps || item.next == stateReports || item.next == stateReportCsv || item.next == stateReportInspect || item.next == stateSettings {
 					m.resetMenuPosition(item.next)
 					return m, nil
 				}
@@ -2149,6 +2316,9 @@ func (m model) View() string {
 		} else if m.state == stateReportCsv {
 			title = "Reports - CSV Validation"
 			sub = "Strict schema and data-quality validation for CSV workflows"
+		} else if m.state == stateReportInspect {
+			title = "Reports - Object Inspector"
+			sub = "Read-only lookup for users, groups, devices, and apps"
 		} else if m.state == stateSettings {
 			title = "Settings"
 			sub = "Authentication configuration for Microsoft Graph"
