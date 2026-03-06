@@ -2326,7 +2326,7 @@ func helpTextForState(state menuState) string {
 			"/: Search within results",
 			"n/N: Next/previous search match",
 			"e: Export current table when available",
-			"d: Drill into top failing apps when available",
+			"d: Drill into failing apps (Top 10 report only)",
 			"Enter/Esc: Return to previous menu",
 			"?: Open this help",
 		}, "\n")
