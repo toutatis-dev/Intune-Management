@@ -2430,7 +2430,7 @@ func (m *model) startWorking() {
 		}
 	}
 drained:
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	m.cancelCtx = ctx
 	m.cancelFunc = cancel
 	m.progressDone = make(chan struct{})
