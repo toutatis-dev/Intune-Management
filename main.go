@@ -696,17 +696,14 @@ func (g *graphClient) listGroups(ctx context.Context) (string, error) {
 }
 
 func (g *graphClient) searchGroups(ctx context.Context, term string) (string, error) {
-	groups, err := g.list(ctx, "/groups?$select=id,displayName")
+	filter := url.QueryEscape(fmt.Sprintf("startswith(displayName,'%s')", escapeOData(term)))
+	groups, err := g.list(ctx, fmt.Sprintf("/groups?$select=id,displayName&$filter=%s", filter))
 	if err != nil {
 		return "", err
 	}
-	termLower := strings.ToLower(term)
-	rows := make([][]string, 0)
+	rows := make([][]string, 0, len(groups))
 	for _, grp := range groups {
-		name := asString(grp["displayName"])
-		if strings.Contains(strings.ToLower(name), termLower) {
-			rows = append(rows, []string{name, asString(grp["id"])})
-		}
+		rows = append(rows, []string{asString(grp["displayName"]), asString(grp["id"])})
 	}
 	if len(rows) == 0 {
 		return fmt.Sprintf("Groups matching %q:\n(No matches)", term), nil
