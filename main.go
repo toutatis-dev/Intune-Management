@@ -299,6 +299,22 @@ func isGraphNotFound(err error) bool {
 	}
 }
 
+func isGraphForbidden(err error) bool {
+	var reqErr *graphRequestError
+	if !errors.As(err, &reqErr) {
+		return false
+	}
+	if reqErr.StatusCode == http.StatusForbidden {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(reqErr.Code)) {
+	case "authorization_requestdenied", "forbidden":
+		return true
+	default:
+		return false
+	}
+}
+
 func shouldRetryStatus(status int) bool {
 	switch status {
 	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
@@ -920,6 +936,8 @@ func (g *graphClient) reportAppFailureDetails(ctx context.Context, identifier st
 		if err := json.Unmarshal(body, &app); err != nil {
 			return "", err
 		}
+	} else if isGraphForbidden(err) {
+		return "", errors.New("access denied: insufficient permissions to read this app")
 	} else if isGraphNotFound(err) {
 		app, err = g.findUniqueByDisplayName(ctx, "/deviceAppManagement/mobileApps", "id,displayName", "app", identifier, formatAppCandidate)
 		if errors.Is(err, errNotFound) {
@@ -991,6 +1009,8 @@ func (g *graphClient) inspectUser(ctx context.Context, identifier string) (strin
 			if err := json.Unmarshal(body, &user); err != nil {
 				return "", err
 			}
+		} else if isGraphForbidden(err) {
+			return "", errors.New("access denied: insufficient permissions to read this user")
 		} else if isGraphNotFound(err) {
 			user, err = g.findUserByDisplayName(ctx, identifier)
 			if err != nil {
@@ -1015,6 +1035,8 @@ func (g *graphClient) inspectGroup(ctx context.Context, identifier string) (stri
 		if err := json.Unmarshal(body, &group); err != nil {
 			return "", err
 		}
+	} else if isGraphForbidden(err) {
+		return "", errors.New("access denied: insufficient permissions to read this group")
 	} else if isGraphNotFound(err) {
 		group, err = g.findUniqueByDisplayName(ctx, "/groups", "id,displayName,description,mailNickname,securityEnabled,mailEnabled", "group", identifier, formatGroupCandidate)
 		if errors.Is(err, errNotFound) {
@@ -1043,6 +1065,8 @@ func (g *graphClient) inspectDevice(ctx context.Context, identifier string) (str
 		if err := json.Unmarshal(body, &device); err != nil {
 			return "", err
 		}
+	} else if isGraphForbidden(err) {
+		return "", errors.New("access denied: insufficient permissions to read this device")
 	} else if isGraphNotFound(err) {
 		device, err = g.findDeviceByDisplayName(ctx, identifier)
 		if err != nil {
@@ -1067,6 +1091,8 @@ func (g *graphClient) inspectApp(ctx context.Context, identifier string) (string
 		if err := json.Unmarshal(body, &app); err != nil {
 			return "", err
 		}
+	} else if isGraphForbidden(err) {
+		return "", errors.New("access denied: insufficient permissions to read this app")
 	} else if isGraphNotFound(err) {
 		app, err = g.findAppByDisplayName(ctx, identifier)
 		if err != nil {
@@ -1077,7 +1103,7 @@ func (g *graphClient) inspectApp(ctx context.Context, identifier string) (string
 	}
 
 	assignments, assignErr := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/assignments?$select=id", url.PathEscape(asString(app["id"]))))
-	assignmentCount := "Unavailable"
+	assignmentCount := fmt.Sprintf("N/A (%v)", assignErr)
 	if assignErr == nil {
 		assignmentCount = fmt.Sprintf("%d", len(assignments))
 	}
