@@ -2332,6 +2332,9 @@ func (m *model) startConfirmExport(path string, cancelState menuState) {
 		mode = "DRY-RUN mode: export will be simulated."
 	}
 	m.confirmBody = mode + "\n\nPath: " + path
+	if _, err := os.Stat(path); err == nil {
+		m.confirmBody += "\n\n⚠ File already exists and will be overwritten."
+	}
 	m.confirmCancelState = cancelState
 	m.pendingExportPath = path
 	m.state = stateConfirm
