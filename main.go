@@ -26,6 +26,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 var requiredScopes = []string{
@@ -410,20 +411,21 @@ func asString(v any) string {
 }
 
 func padRight(s string, w int) string {
-	if len(s) >= w {
+	sw := runewidth.StringWidth(s)
+	if sw >= w {
 		return s
 	}
-	return s + strings.Repeat(" ", w-len(s))
+	return s + strings.Repeat(" ", w-sw)
 }
 
 func truncate(s string, w int) string {
-	if w <= 0 || len(s) <= w {
+	if w <= 0 || runewidth.StringWidth(s) <= w {
 		return s
 	}
 	if w <= 3 {
-		return s[:w]
+		return runewidth.Truncate(s, w, "")
 	}
-	return s[:w-3] + "..."
+	return runewidth.Truncate(s, w, "...")
 }
 
 func renderTable(headers []string, rows [][]string) string {
@@ -432,12 +434,14 @@ func renderTable(headers []string, rows [][]string) string {
 	}
 	widths := make([]int, len(headers))
 	for i, h := range headers {
-		widths[i] = len(h)
+		widths[i] = runewidth.StringWidth(h)
 	}
 	for _, r := range rows {
 		for i := range headers {
-			if i < len(r) && len(r[i]) > widths[i] {
-				widths[i] = len(r[i])
+			if i < len(r) {
+				if w := runewidth.StringWidth(r[i]); w > widths[i] {
+					widths[i] = w
+				}
 			}
 		}
 	}
