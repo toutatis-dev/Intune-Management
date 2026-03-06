@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestRenderTableAndParseTableFromTextRoundTrip(t *testing.T) {
@@ -573,4 +575,199 @@ func writeTempFile(t *testing.T, name, contents string) string {
 		t.Fatalf("os.WriteFile failed: %v", err)
 	}
 	return path
+}
+
+// --- Round 2 tests ---
+
+func TestParentMenuState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		state menuState
+		want  menuState
+	}{
+		{stateUsersGroups, stateMain},
+		{stateDevicesApps, stateMain},
+		{stateReports, stateMain},
+		{stateSettings, stateMain},
+		{stateReportCsv, stateReports},
+		{stateReportInspect, stateReports},
+		{stateMain, stateMain},
+	}
+	for _, tt := range tests {
+		if got := parentMenuState(tt.state); got != tt.want {
+			t.Fatalf("parentMenuState(%d) = %d, want %d", tt.state, got, tt.want)
+		}
+	}
+}
+
+func TestNumberHotkeys(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(nil)
+	m.state = stateUsersGroups
+	m.width = 120
+	m.height = 40
+
+	// Press "3" on a menu with 6 items — should select item 3.
+	visible := m.visibleMenu()
+	if len(visible) < 5 {
+		t.Fatalf("expected at least 5 visible menu items, got %d", len(visible))
+	}
+	updated, _ := m.Update(tea.KeyMsg(tea.Key{Type: tea.KeyRunes, Runes: []rune{'3'}}))
+	m2 := updated.(model)
+	// Number hotkey re-sends Enter, so the model should have transitioned.
+	// At minimum the cursor should have moved to index 2 before the Enter.
+	// The exact state depends on the action; just verify no panic and state changed.
+	if m2.state == stateUsersGroups && m2.cursor == 0 {
+		t.Fatal("expected number hotkey to change cursor or state")
+	}
+
+	// Press "9" on a menu with 6 items — should be ignored.
+	m3 := newModel(nil)
+	m3.state = stateUsersGroups
+	m3.width = 120
+	m3.height = 40
+	updated2, _ := m3.Update(tea.KeyMsg(tea.Key{Type: tea.KeyRunes, Runes: []rune{'9'}}))
+	m4 := updated2.(model)
+	if m4.state != stateUsersGroups || m4.cursor != 0 {
+		t.Fatalf("expected out-of-range number hotkey to be ignored, state=%d cursor=%d", m4.state, m4.cursor)
+	}
+}
+
+func TestInputBackNavigation(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(nil)
+	m.state = stateInput
+	m.lastMenuState = stateUsersGroups
+	m.currentSpec = specForAction(actAddUsersCSV) // 2-prompt action
+	m.inputs = []string{"/tmp/users.csv"}
+	m.input.SetValue("TestGroup")
+	m.input.Prompt = m.currentSpec.prompts[1] + ": "
+
+	// Press Esc on step 2 — should go back to step 1 with previous value restored.
+	updated, _ := m.Update(tea.KeyMsg(tea.Key{Type: tea.KeyEscape}))
+	m2 := updated.(model)
+	if m2.state != stateInput {
+		t.Fatalf("expected state to remain stateInput, got %d", m2.state)
+	}
+	if len(m2.inputs) != 0 {
+		t.Fatalf("expected inputs to be empty after back, got %v", m2.inputs)
+	}
+	if m2.input.Value() != "/tmp/users.csv" {
+		t.Fatalf("expected previous value restored, got %q", m2.input.Value())
+	}
+
+	// Press Esc again on step 1 — should return to menu.
+	updated2, _ := m2.Update(tea.KeyMsg(tea.Key{Type: tea.KeyEscape}))
+	m3 := updated2.(model)
+	if m3.state != stateUsersGroups {
+		t.Fatalf("expected return to menu state, got %d", m3.state)
+	}
+}
+
+func TestVisibleMenuFiltering(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(nil)
+	m.state = stateUsersGroups
+
+	// Empty filter returns all items.
+	m.filterQuery = ""
+	all := m.visibleMenu()
+	if len(all) != len(m.userMenu) {
+		t.Fatalf("expected %d items with empty filter, got %d", len(m.userMenu), len(all))
+	}
+
+	// No-match filter returns empty.
+	m.filterQuery = "zzzznonexistent"
+	none := m.visibleMenu()
+	if len(none) != 0 {
+		t.Fatalf("expected 0 items for non-matching filter, got %d", len(none))
+	}
+
+	// Case-insensitive match.
+	m.filterQuery = "BULK"
+	matched := m.visibleMenu()
+	if len(matched) != 1 {
+		t.Fatalf("expected 1 match for 'BULK', got %d", len(matched))
+	}
+	if !strings.Contains(matched[0].item.label, "Bulk") {
+		t.Fatalf("expected match to contain 'Bulk', got %q", matched[0].item.label)
+	}
+}
+
+func TestJumpToNextMatchWraps(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(nil)
+	m.output = "alpha\nbeta\ngamma\ndelta\nbeta again"
+	m.searchQuery = "beta"
+	m.searchMatchLine = -1
+	m.viewport.Width = 80
+	m.viewport.Height = 20
+	m.viewport.SetContent(m.output)
+
+	// Forward: should find first "beta" at line 1.
+	m.jumpToNextMatch(true)
+	if m.searchMatchLine != 1 {
+		t.Fatalf("expected first forward match at line 1, got %d", m.searchMatchLine)
+	}
+
+	// Forward again: should wrap to line 4 ("beta again").
+	m.jumpToNextMatch(true)
+	if m.searchMatchLine != 4 {
+		t.Fatalf("expected second forward match at line 4, got %d", m.searchMatchLine)
+	}
+
+	// Forward again: should wrap back to line 1.
+	m.jumpToNextMatch(true)
+	if m.searchMatchLine != 1 {
+		t.Fatalf("expected wrap-around forward match at line 1, got %d", m.searchMatchLine)
+	}
+
+	// Backward from line 1: should wrap to line 4.
+	m.jumpToNextMatch(false)
+	if m.searchMatchLine != 4 {
+		t.Fatalf("expected backward wrap match at line 4, got %d", m.searchMatchLine)
+	}
+}
+
+func TestExportDirectoryValidation(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(nil)
+	m.state = stateExportPrompt
+	m.lastHeaders = []string{"A"}
+	m.lastRows = [][]string{{"1"}}
+	m.styles = newUIStyles()
+	m.width = 120
+	m.height = 40
+	m.vpReady = true
+
+	// Enter a path with a nonexistent parent directory.
+	m.exportInput.SetValue(filepath.Join(t.TempDir(), "nonexistent", "subdir", "file.csv"))
+	updated, _ := m.Update(tea.KeyMsg(tea.Key{Type: tea.KeyEnter}))
+	m2 := updated.(model)
+	if m2.state != stateOutput {
+		t.Fatalf("expected transition to stateOutput on bad dir, got %d", m2.state)
+	}
+	if !strings.Contains(m2.output, "Directory does not exist") {
+		t.Fatalf("expected directory error message, got %q", m2.output)
+	}
+}
+
+func TestIsGraphForbidden(t *testing.T) {
+	t.Parallel()
+
+	if !isGraphForbidden(formatGraphError("GET", "https://graph.microsoft.com/v1.0/users/1", "403 Forbidden", []byte(`{"error":{"code":"Authorization_RequestDenied","message":"Denied"}}`))) {
+		t.Fatal("expected 403 graph error to be treated as forbidden")
+	}
+	if isGraphForbidden(formatGraphError("GET", "https://graph.microsoft.com/v1.0/users/1", "404 Not Found", []byte(`{"error":{"code":"Request_ResourceNotFound","message":"Missing"}}`))) {
+		t.Fatal("expected 404 graph error to not be treated as forbidden")
+	}
+	if isGraphForbidden(errors.New("plain error")) {
+		t.Fatal("expected generic error to not be treated as forbidden")
+	}
 }
