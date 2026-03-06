@@ -2127,12 +2127,26 @@ func (m *model) jumpToNextMatch(forward bool) {
 		}
 		if strings.Contains(strings.ToLower(lines[idx]), q) {
 			m.searchMatchLine = idx
+			m.applySearchHighlight()
 			// Scroll viewport so the matched line is visible.
 			lineOffset := maxInt(0, idx-m.viewport.Height/2)
 			m.viewport.SetYOffset(lineOffset)
 			return
 		}
 	}
+}
+
+func (m *model) applySearchHighlight() {
+	lines := strings.Split(m.output, "\n")
+	if m.searchMatchLine < 0 || m.searchMatchLine >= len(lines) || m.searchQuery == "" {
+		m.viewport.SetContent(m.output)
+		return
+	}
+	hl := lipgloss.NewStyle().Reverse(true)
+	built := make([]string, len(lines))
+	copy(built, lines)
+	built[m.searchMatchLine] = hl.Render(lines[m.searchMatchLine])
+	m.viewport.SetContent(strings.Join(built, "\n"))
 }
 
 func (m *model) setOutput(text string) {
@@ -3099,6 +3113,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchMatchLine = -1
 				if m.searchQuery != "" {
 					m.jumpToNextMatch(true)
+				} else {
+					m.viewport.SetContent(m.output)
 				}
 				m.state = stateOutput
 				return m, nil
