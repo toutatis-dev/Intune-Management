@@ -2308,6 +2308,15 @@ func (m *model) startWorking() {
 	if m.progressActive && m.progressDone != nil {
 		close(m.progressDone)
 	}
+	// Drain stale progress messages from previous operations.
+	for {
+		select {
+		case <-m.progressCh:
+		default:
+			goto drained
+		}
+	}
+drained:
 	m.progressDone = make(chan struct{})
 	m.progressActive = true
 	m.state = stateWorking
