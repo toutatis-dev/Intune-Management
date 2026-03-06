@@ -1493,20 +1493,24 @@ func (g *graphClient) addUsersCSV(ctx context.Context, csvPath, groupName string
 	groupID := asString(group["id"])
 
 	var b strings.Builder
+	var added, failed, skipped int
 	for _, row := range data.Rows {
 		upn := row["User_Principal_Name"]
 		if upn == "" {
 			fmt.Fprintf(&b, "Skipped row: missing User_Principal_Name\n")
+			skipped++
 			continue
 		}
 		filter := url.QueryEscape(fmt.Sprintf("userPrincipalName eq '%s'", escapeOData(upn)))
 		users, err := g.list(ctx, "/users?$select=id,userPrincipalName&$filter="+filter)
 		if err != nil {
 			fmt.Fprintf(&b, "Failed to look up user %s: %v\n", upn, err)
+			failed++
 			continue
 		}
 		if len(users) == 0 {
 			fmt.Fprintf(&b, "User not found: %s\n", upn)
+			failed++
 			continue
 		}
 		userID := asString(users[0]["id"])
@@ -1515,15 +1519,19 @@ func (g *graphClient) addUsersCSV(ctx context.Context, csvPath, groupName string
 		}
 		if dryRun {
 			fmt.Fprintf(&b, "Would add %s\n", upn)
+			added++
 			continue
 		}
 		_, err = g.do(ctx, http.MethodPost, fmt.Sprintf("%s/groups/%s/members/$ref", graphBase, groupID), body)
 		if err != nil {
 			fmt.Fprintf(&b, "Failed to add %s: %v\n", upn, err)
+			failed++
 			continue
 		}
 		fmt.Fprintf(&b, "Added %s\n", upn)
+		added++
 	}
+	fmt.Fprintf(&b, "\nSummary: %d added, %d failed, %d skipped", added, failed, skipped)
 	return b.String(), nil
 }
 
@@ -1533,19 +1541,23 @@ func (g *graphClient) makeGroupsCSV(ctx context.Context, csvPath string, dryRun 
 		return "", err
 	}
 	var b strings.Builder
+	var created, failed, skipped int
 	for _, row := range data.Rows {
 		groupName := row["Group_Name"]
 		if groupName == "" {
 			fmt.Fprintf(&b, "Skipped row: missing Group_Name\n")
+			skipped++
 			continue
 		}
 		_, err := g.findGroupByDisplayName(ctx, groupName)
 		if err == nil {
 			fmt.Fprintf(&b, "Exists: %s\n", groupName)
+			skipped++
 			continue
 		}
 		if !errors.Is(err, errNotFound) {
 			fmt.Fprintf(&b, "Failed to check existing group %s: %v\n", groupName, err)
+			failed++
 			continue
 		}
 		body := map[string]any{
@@ -1557,15 +1569,19 @@ func (g *graphClient) makeGroupsCSV(ctx context.Context, csvPath string, dryRun 
 		}
 		if dryRun {
 			fmt.Fprintf(&b, "Would create: %s\n", groupName)
+			created++
 			continue
 		}
 		_, err = g.do(ctx, http.MethodPost, graphBase+"/groups", body)
 		if err != nil {
 			fmt.Fprintf(&b, "Failed to create %s: %v\n", groupName, err)
+			failed++
 			continue
 		}
 		fmt.Fprintf(&b, "Created: %s\n", groupName)
+		created++
 	}
+	fmt.Fprintf(&b, "\nSummary: %d created, %d failed, %d skipped", created, failed, skipped)
 	return b.String(), nil
 }
 
@@ -1575,16 +1591,19 @@ func (g *graphClient) addAppsCSV(ctx context.Context, csvPath string, dryRun boo
 		return "", err
 	}
 	var b strings.Builder
+	var assigned, failed, skipped int
 	for _, row := range data.Rows {
 		appName := row["App_Name"]
 		groupName := row["Group_Name"]
 		if appName == "" || groupName == "" {
 			fmt.Fprintf(&b, "Skipped row: missing App_Name or Group_Name\n")
+			skipped++
 			continue
 		}
 		app, err := g.findAppByDisplayName(ctx, appName)
 		if err != nil {
 			fmt.Fprintf(&b, "App lookup failed for %s: %v\n", appName, err)
+			failed++
 			continue
 		}
 		appID := asString(app["id"])
@@ -1592,6 +1611,7 @@ func (g *graphClient) addAppsCSV(ctx context.Context, csvPath string, dryRun boo
 		group, err := g.findGroupByDisplayName(ctx, groupName)
 		if err != nil {
 			fmt.Fprintf(&b, "Group lookup failed for %s: %v\n", groupName, err)
+			failed++
 			continue
 		}
 		groupID := asString(group["id"])
@@ -1605,15 +1625,19 @@ func (g *graphClient) addAppsCSV(ctx context.Context, csvPath string, dryRun boo
 		}
 		if dryRun {
 			fmt.Fprintf(&b, "Would assign %s -> %s\n", appName, groupName)
+			assigned++
 			continue
 		}
 		_, err = g.do(ctx, http.MethodPost, fmt.Sprintf("%s/deviceAppManagement/mobileApps/%s/assignments", graphBase, appID), body)
 		if err != nil {
 			fmt.Fprintf(&b, "Failed assignment app=%s group=%s: %v\n", appName, groupName, err)
+			failed++
 			continue
 		}
 		fmt.Fprintf(&b, "Assigned %s -> %s\n", appName, groupName)
+		assigned++
 	}
+	fmt.Fprintf(&b, "\nSummary: %d assigned, %d failed, %d skipped", assigned, failed, skipped)
 	return b.String(), nil
 }
 
