@@ -2802,6 +2802,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				val := strings.TrimSpace(m.input.Value())
 				m.inputs = append(m.inputs, val)
+				// Early validation: check CSV file exists before asking remaining prompts.
+				prevPrompt := m.currentSpec.prompts[len(m.inputs)-1]
+				if strings.Contains(strings.ToLower(prevPrompt), "csv path") {
+					if _, err := os.Stat(val); err != nil {
+						m.inputs = m.inputs[:len(m.inputs)-1]
+						m.setOutput("Error:\nFile not found: " + val)
+						return m, nil
+					}
+				}
 				if len(m.inputs) < len(m.currentSpec.prompts) {
 					m.input.SetValue("")
 					m.input.Prompt = m.currentSpec.prompts[len(m.inputs)] + ": "
