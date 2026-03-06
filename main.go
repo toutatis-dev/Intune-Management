@@ -1696,6 +1696,7 @@ func (g *graphClient) listGroupApps(ctx context.Context) (string, error) {
 		groupNameCache[groupID] = name
 		return name
 	}
+	skipped := 0
 	for i, app := range apps {
 		if (i+1)%20 == 0 {
 			g.emitProgress(fmt.Sprintf("Processed %d/%d apps...", i+1, len(apps)))
@@ -1703,6 +1704,7 @@ func (g *graphClient) listGroupApps(ctx context.Context) (string, error) {
 		appID := asString(app["id"])
 		assignments, err := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/assignments?$select=id,intent,target", appID))
 		if err != nil {
+			skipped++
 			continue
 		}
 		for _, a := range assignments {
@@ -1736,6 +1738,9 @@ func (g *graphClient) listGroupApps(ctx context.Context) (string, error) {
 		tabRows = append(tabRows, []string{r.AppName, r.GroupName, r.AssignmentID, r.Intent})
 	}
 	fmt.Fprintf(&b, "App-group assignments: %d\n\n%s", len(rows), renderTable([]string{"App", "Group", "Assignment ID", "Intent"}, tabRows))
+	if skipped > 0 {
+		fmt.Fprintf(&b, "\n(%d apps skipped due to errors)", skipped)
+	}
 	return b.String(), nil
 }
 
