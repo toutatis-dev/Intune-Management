@@ -360,19 +360,15 @@ func (g *graphClient) authHealth(ctx context.Context) (string, error) {
 	effectiveTenant := asString(claims["tid"])
 	tokenScopes := asString(claims["scp"])
 
-	var b strings.Builder
-	b.WriteString("Auth Health\n\n")
-	fmt.Fprintf(&b, "Configured Client ID: %s\n", g.cfg.ClientID)
-	fmt.Fprintf(&b, "Configured Tenant ID: %s\n", g.cfg.TenantID)
-	fmt.Fprintf(&b, "Token Client ID: %s\n", effectiveClient)
-	fmt.Fprintf(&b, "Token Tenant ID: %s\n", effectiveTenant)
-	fmt.Fprintf(&b, "Token Expires (UTC): %s\n", exp)
-	fmt.Fprintf(&b, "Token Scopes: %s\n\n", tokenScopes)
-	b.WriteString("Requested Scopes:\n")
-	for _, s := range g.scope {
-		fmt.Fprintf(&b, "- %s\n", s)
-	}
-	return b.String(), nil
+	return renderInspector("Auth Health", [][2]string{
+		{"Configured Client ID", g.cfg.ClientID},
+		{"Configured Tenant ID", g.cfg.TenantID},
+		{"Token Client ID", effectiveClient},
+		{"Token Tenant ID", effectiveTenant},
+		{"Token Expires (UTC)", exp},
+		{"Token Scopes", tokenScopes},
+		{"Requested Scopes", strings.Join(g.scope, ", ")},
+	}), nil
 }
 
 func (g *graphClient) list(ctx context.Context, path string) ([]map[string]any, error) {
@@ -1736,6 +1732,7 @@ const (
 	stateDrillPrompt
 	stateHelp
 	stateOutput
+	stateOutputSearch
 )
 
 type actionID int
@@ -1850,6 +1847,9 @@ type model struct {
 	cancelFunc         context.CancelFunc
 	helpReturnState    menuState
 	lastActionID       actionID
+	searchInput        textinput.Model
+	searchQuery        string
+	searchMatchLine    int
 }
 
 type uiStyles struct {
@@ -1899,6 +1899,10 @@ func newModel(client *graphClient) model {
 	di.CharLimit = 200
 	di.Width = 72
 	di.Prompt = "Enter rank or exact app name: "
+	si := textinput.New()
+	si.CharLimit = 120
+	si.Width = 48
+	si.Prompt = "Search: "
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 
@@ -1959,14 +1963,16 @@ func newModel(client *graphClient) model {
 			{label: "Reset Auth Defaults", description: "Client ID: Graph PowerShell app, Tenant: common", action: actResetAuth},
 			{label: "Back", description: "Return to main menu", next: stateMain},
 		},
-		spin:        sp,
-		styles:      newUIStyles(),
-		input:       ti,
-		filterInput: fi,
-		exportInput: ei,
-		drillInput:  di,
-		viewport:    viewport.New(80, 20),
-		progressCh:  make(chan progressMsg, 64),
+		spin:           sp,
+		styles:         newUIStyles(),
+		input:          ti,
+		filterInput:    fi,
+		exportInput:    ei,
+		drillInput:     di,
+		searchInput:    si,
+		searchMatchLine: -1,
+		viewport:       viewport.New(80, 20),
+		progressCh:     make(chan progressMsg, 64),
 	}
 }
 
@@ -2043,6 +2049,17 @@ func (m *model) ensureMenuCursorVisible() {
 	}
 }
 
+func parentMenuState(s menuState) menuState {
+	switch s {
+	case stateUsersGroups, stateDevicesApps, stateReports, stateSettings:
+		return stateMain
+	case stateReportCsv, stateReportInspect:
+		return stateReports
+	default:
+		return stateMain
+	}
+}
+
 func (m *model) resetMenuPosition(state menuState) {
 	m.state = state
 	m.cursor = 0
@@ -2054,6 +2071,37 @@ func (m *model) resetMenuPosition(state menuState) {
 func (m *model) returnToLastMenu() {
 	m.state = m.lastMenuState
 	m.ensureMenuCursorVisible()
+}
+
+func (m *model) jumpToNextMatch(forward bool) {
+	lines := strings.Split(m.output, "\n")
+	q := strings.ToLower(m.searchQuery)
+	start := m.searchMatchLine + 1
+	if !forward {
+		start = m.searchMatchLine - 1
+	}
+	n := len(lines)
+	for i := 0; i < n; i++ {
+		var idx int
+		if forward {
+			idx = (start + i) % n
+			if idx < 0 {
+				idx += n
+			}
+		} else {
+			idx = (start - i) % n
+			if idx < 0 {
+				idx += n
+			}
+		}
+		if strings.Contains(strings.ToLower(lines[idx]), q) {
+			m.searchMatchLine = idx
+			// Scroll viewport so the matched line is visible.
+			lineOffset := maxInt(0, idx-m.viewport.Height/2)
+			m.viewport.SetYOffset(lineOffset)
+			return
+		}
+	}
 }
 
 func (m *model) setOutput(text string) {
@@ -2218,6 +2266,7 @@ func helpTextForState(state menuState) string {
 			"Up/Down or j/k: Move selection",
 			"PgUp/PgDn: Move by page",
 			"Home/End: Jump to top or bottom",
+			"1-9: Jump to item by number",
 			"Enter: Select item",
 			"/: Filter menu options",
 			"Esc: Back, or quit from main menu",
@@ -2229,6 +2278,8 @@ func helpTextForState(state menuState) string {
 			"Result Help",
 			"",
 			"Up/Down PgUp/PgDn Home/End: Scroll result",
+			"/: Search within results",
+			"n/N: Next/previous search match",
 			"e: Export current table when available",
 			"d: Drill into top failing apps when available",
 			"Enter/Esc: Return to previous menu",
@@ -2624,7 +2675,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.state == stateMain {
 					return m, tea.Quit
 				}
-				m.resetMenuPosition(stateMain)
+				m.resetMenuPosition(parentMenuState(m.state))
 			case "/":
 				m.lastMenuState = m.state
 				m.filterInput.SetValue(m.filterQuery)
@@ -2705,6 +2756,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.resetMenuPosition(item.next)
 					return m, nil
 				}
+			default:
+				if k := msg.String(); len(k) == 1 && k[0] >= '1' && k[0] <= '9' {
+					idx := int(k[0]-'0') - 1
+					if idx < len(visible) {
+						m.cursor = idx
+						m.ensureMenuCursorVisible()
+						// Re-send Enter so the selection logic runs.
+						return m.Update(tea.KeyMsg(tea.Key{Type: tea.KeyEnter}))
+					}
+				}
 			}
 		case stateMenuFilter:
 			switch msg.String() {
@@ -2727,6 +2788,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case stateInput:
 			switch msg.String() {
 			case "esc":
+				if len(m.inputs) > 0 {
+					prev := m.inputs[len(m.inputs)-1]
+					m.inputs = m.inputs[:len(m.inputs)-1]
+					m.input.SetValue(prev)
+					m.input.Prompt = m.currentSpec.prompts[len(m.inputs)] + ": "
+					m.input.CursorEnd()
+					return m, nil
+				}
 				m.input.Blur()
 				m.returnToLastMenu()
 				return m, nil
@@ -2814,6 +2883,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(m.lastHeaders) == 0 || len(m.lastRows) == 0 {
 					m.setOutput("Error:\nNo table data available to export.")
 					return m, nil
+				}
+				if dir := filepath.Dir(path); dir != "." {
+					if _, err := os.Stat(dir); err != nil {
+						m.setOutput("Error:\nDirectory does not exist: " + dir)
+						return m, nil
+					}
 				}
 				m.exportInput.Blur()
 				m.startConfirmExport(path, stateExportPrompt)
@@ -2906,7 +2981,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "esc":
 				m.stopWorking()
-				m.returnToLastMenu()
+				m.setOutput("Operation cancelled.")
 				return m, nil
 			case "ctrl+c":
 				return m, tea.Quit
@@ -2926,10 +3001,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter", "esc":
 				m.returnToLastMenu()
 				m.output = ""
+				m.searchQuery = ""
+				m.searchMatchLine = -1
 				m.lastHeaders = nil
 				m.lastRows = nil
 				m.viewport.SetContent("")
 				m.viewport.GotoTop()
+				return m, nil
+			case "/":
+				m.searchInput.SetValue(m.searchQuery)
+				m.searchInput.CursorEnd()
+				m.searchInput.Focus()
+				m.state = stateOutputSearch
+				return m, textinput.Blink
+			case "n":
+				if m.searchQuery != "" {
+					m.jumpToNextMatch(true)
+				}
+				return m, nil
+			case "N":
+				if m.searchQuery != "" {
+					m.jumpToNextMatch(false)
+				}
 				return m, nil
 			case "e":
 				if len(m.lastHeaders) == 0 || len(m.lastRows) == 0 {
@@ -2953,6 +3046,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
+			return m, cmd
+		case stateOutputSearch:
+			switch msg.String() {
+			case "esc":
+				m.searchInput.Blur()
+				m.state = stateOutput
+				return m, nil
+			case "enter":
+				m.searchQuery = strings.TrimSpace(m.searchInput.Value())
+				m.searchInput.Blur()
+				m.searchMatchLine = -1
+				if m.searchQuery != "" {
+					m.jumpToNextMatch(true)
+				}
+				m.state = stateOutput
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.searchInput, cmd = m.searchInput.Update(msg)
 			return m, cmd
 		}
 	case spinner.TickMsg:
@@ -3021,10 +3133,14 @@ func (m model) View() string {
 		step := len(m.inputs) + 1
 		total := len(m.currentSpec.prompts)
 		title := m.styles.subHeader.Render(fmt.Sprintf("Input %d/%d", step, total))
+		escHint := "Esc: cancel"
+		if len(m.inputs) > 0 {
+			escHint = "Esc: back"
+		}
 		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
 			title,
 			m.input.View(),
-			m.styles.hint.Render("Enter: continue   Esc: cancel"),
+			m.styles.hint.Render("Enter: continue   "+escHint),
 		))
 		return m.styles.app.Render(m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
 	case statePreview:
@@ -3060,12 +3176,15 @@ func (m model) View() string {
 		if m.vpReady {
 			content = m.viewport.View()
 		}
-		exportHint := "Up/Down PgUp/PgDn Home/End: scroll   Enter/Esc: return"
+		exportHint := "/: search   Enter/Esc: return"
 		if len(m.lastHeaders) > 0 && len(m.lastRows) > 0 {
-			exportHint = "Up/Down PgUp/PgDn Home/End: scroll   e: export table   Enter/Esc: return"
+			exportHint = "/: search   e: export table   Enter/Esc: return"
 		}
 		if m.lastActionID == actReportTopFailingApps {
-			exportHint = "Up/Down PgUp/PgDn Home/End: scroll   d: drill down   e: export table   Enter/Esc: return"
+			exportHint = "/: search   d: drill down   e: export table   Enter/Esc: return"
+		}
+		if m.searchQuery != "" {
+			exportHint = fmt.Sprintf("/%s (n/N: next/prev)   ", m.searchQuery) + exportHint
 		}
 		headerPanel := m.resultSummaryView()
 		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
@@ -3074,6 +3193,17 @@ func (m model) View() string {
 			m.styles.hint.Render(exportHint),
 		))
 		return m.styles.app.Render(m.styles.header.Render(" Intune Management Tool ") + "\n\n" + headerPanel + "\n\n" + body)
+	case stateOutputSearch:
+		content := m.output
+		if m.vpReady {
+			content = m.viewport.View()
+		}
+		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
+			m.styles.subHeader.Render("Search Results"),
+			content,
+			m.searchInput.View(),
+		))
+		return m.styles.app.Render(m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
 	default:
 		title := "Main Menu"
 		sub := "Pick an operation area"
@@ -3105,7 +3235,7 @@ func (m model) View() string {
 			m.styles.subHeader.Render(title) + "\n" +
 			m.styles.hint.Render(sub) + "\n\n" +
 			m.styles.panel.Render(menuView) + filterLine + "\n\n" +
-			m.styles.hint.Render("Arrows/jk PgUp/PgDn Home/End: move   /: filter   Enter: select   Esc: back   q: quit")
+			m.styles.hint.Render("Arrows/jk 1-9: move   /: filter   Enter: select   Esc: back   q: quit")
 		return m.styles.app.Render(screen)
 	}
 }
