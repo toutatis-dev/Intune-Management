@@ -1808,6 +1808,8 @@ type model struct {
 	progressDone       chan struct{}
 	progressActive     bool
 	progressText       string
+	cancelCtx          context.Context
+	cancelFunc         context.CancelFunc
 	helpReturnState    menuState
 	lastActionID       actionID
 }
@@ -2216,6 +2218,7 @@ func helpTextForState(state menuState) string {
 			"Working Help",
 			"",
 			"Spinner and progress text show current Graph activity.",
+			"Esc: Cancel operation and return to menu",
 			"Ctrl+C: Quit application",
 			"?: Open this help",
 		}, "\n")
@@ -2323,6 +2326,9 @@ func (m *model) startWorking() {
 	if m.progressActive && m.progressDone != nil {
 		close(m.progressDone)
 	}
+	if m.cancelFunc != nil {
+		m.cancelFunc()
+	}
 	// Drain stale progress messages from previous operations.
 	for {
 		select {
@@ -2332,6 +2338,9 @@ func (m *model) startWorking() {
 		}
 	}
 drained:
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelCtx = ctx
+	m.cancelFunc = cancel
 	m.progressDone = make(chan struct{})
 	m.progressActive = true
 	m.state = stateWorking
@@ -2342,6 +2351,10 @@ drained:
 func (m *model) stopWorking() {
 	if m.progressActive && m.progressDone != nil {
 		close(m.progressDone)
+	}
+	if m.cancelFunc != nil {
+		m.cancelFunc()
+		m.cancelFunc = nil
 	}
 	m.progressDone = nil
 	m.progressActive = false
@@ -2460,7 +2473,7 @@ func (m *model) runLocalAction(id actionID, inputs []string) (string, error, boo
 
 func (m model) runActionCmd(spec actionSpec, inputs []string) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
+		ctx := m.cancelCtx
 		m.client.setProgressHook(func(text string) {
 			select {
 			case m.progressCh <- progressMsg{text: text}:
@@ -2784,8 +2797,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastActionLabel = "Failing App Drill-Down"
 				m.lastActionID = actNone
 				m.startWorking()
+				ctx := m.cancelCtx
 				return m, tea.Batch(m.spin.Tick, waitProgressCmd(m.progressCh, m.progressDone), func() tea.Msg {
-					out, err := m.client.reportAppFailureDetails(context.Background(), appName)
+					out, err := m.client.reportAppFailureDetails(ctx, appName)
 					return resultMsg{text: out, err: err}
 				})
 			}
@@ -2848,6 +2862,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "?":
 				m.helpReturnState = m.state
 				m.state = stateHelp
+				return m, nil
+			case "esc":
+				m.stopWorking()
+				m.returnToLastMenu()
 				return m, nil
 			case "ctrl+c":
 				return m, tea.Quit
@@ -2986,9 +3004,10 @@ func (m model) View() string {
 		if strings.TrimSpace(progress) == "" {
 			progress = "Starting operation..."
 		}
-		body := m.styles.panel.Render(fmt.Sprintf("%s Running Graph operation...\n\n%s",
+		body := m.styles.panel.Render(fmt.Sprintf("%s Running Graph operation...\n\n%s\n\n%s",
 			m.spin.View(),
 			m.styles.hint.Render(progress),
+			m.styles.hint.Render("Esc: cancel"),
 		))
 		return m.styles.app.Render(m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
 	case stateOutput:
