@@ -142,13 +142,9 @@ func newGraphClientWithConfig(cfg authConfig) (*graphClient, error) {
 }
 
 func (g *graphClient) do(ctx context.Context, method, fullURL string, body any) ([]byte, error) {
-	token, err := g.cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: g.scope})
-	if err != nil {
-		return nil, err
-	}
-
 	var payload []byte
 	if body != nil {
+		var err error
 		payload, err = json.Marshal(body)
 		if err != nil {
 			return nil, err
@@ -156,7 +152,13 @@ func (g *graphClient) do(ctx context.Context, method, fullURL string, body any) 
 	}
 
 	const maxRetries = 4
+	hadAuthRetry := false
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		token, err := g.cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: g.scope})
+		if err != nil {
+			return nil, err
+		}
+
 		var reader io.Reader
 		if len(payload) > 0 {
 			reader = bytes.NewReader(payload)
@@ -190,6 +192,12 @@ func (g *graphClient) do(ctx context.Context, method, fullURL string, body any) 
 
 		if resp.StatusCode < 400 {
 			return raw, nil
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized && !hadAuthRetry {
+			hadAuthRetry = true
+			g.emitProgress("Token expired; refreshing credentials...")
+			continue
 		}
 
 		if shouldRetryStatus(resp.StatusCode) && attempt < maxRetries {
