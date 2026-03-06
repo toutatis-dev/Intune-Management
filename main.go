@@ -1617,7 +1617,29 @@ func (g *graphClient) listGroupApps(ctx context.Context) (string, error) {
 		Intent       string
 	}
 	var rows []row
-	for _, app := range apps {
+	groupNameCache := map[string]string{}
+	resolveGroup := func(groupID string) string {
+		if name, ok := groupNameCache[groupID]; ok {
+			return name
+		}
+		b, err := g.do(ctx, http.MethodGet, graphBase+"/groups/"+groupID+"?$select=displayName", nil)
+		if err != nil {
+			groupNameCache[groupID] = ""
+			return ""
+		}
+		var grp map[string]any
+		if json.Unmarshal(b, &grp) != nil {
+			groupNameCache[groupID] = ""
+			return ""
+		}
+		name := asString(grp["displayName"])
+		groupNameCache[groupID] = name
+		return name
+	}
+	for i, app := range apps {
+		if (i+1)%20 == 0 {
+			g.emitProgress(fmt.Sprintf("Processed %d/%d apps...", i+1, len(apps)))
+		}
 		appID := asString(app["id"])
 		assignments, err := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/assignments?$select=id,intent,target", appID))
 		if err != nil {
@@ -1632,17 +1654,13 @@ func (g *graphClient) listGroupApps(ctx context.Context) (string, error) {
 			if groupID == "" {
 				continue
 			}
-			b, err := g.do(ctx, http.MethodGet, graphBase+"/groups/"+groupID+"?$select=displayName", nil)
-			if err != nil {
-				continue
-			}
-			var grp map[string]any
-			if json.Unmarshal(b, &grp) != nil {
+			groupName := resolveGroup(groupID)
+			if groupName == "" {
 				continue
 			}
 			rows = append(rows, row{
 				AppName:      asString(app["displayName"]),
-				GroupName:    asString(grp["displayName"]),
+				GroupName:    groupName,
 				AssignmentID: asString(a["id"]),
 				Intent:       asString(a["intent"]),
 			})
