@@ -292,6 +292,8 @@ func isGraphNotFound(err error) bool {
 	switch strings.ToLower(strings.TrimSpace(reqErr.Code)) {
 	case "itemnotfound", "request_resourcenotfound", "resourcenotfound", "directoryobjectnotfound":
 		return true
+	case "request_badrequest":
+		return strings.Contains(strings.ToLower(reqErr.Message), "invalid object identifier")
 	default:
 		return false
 	}

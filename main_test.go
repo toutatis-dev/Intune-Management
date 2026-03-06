@@ -268,6 +268,12 @@ func TestIsGraphNotFound(t *testing.T) {
 	if isGraphNotFound(errors.New("plain error")) {
 		t.Fatal("expected generic error to not be treated as not found")
 	}
+	if !isGraphNotFound(formatGraphError("GET", "https://graph.microsoft.com/v1.0/groups/MyGroup", "400 Bad Request", []byte(`{"error":{"code":"Request_BadRequest","message":"Invalid object identifier 'MyGroup'."}}`))){
+		t.Fatal("expected 400 invalid object identifier to be treated as not found")
+	}
+	if isGraphNotFound(formatGraphError("GET", "https://graph.microsoft.com/v1.0/groups/1", "400 Bad Request", []byte(`{"error":{"code":"Request_BadRequest","message":"Some other bad request."}}`))){
+		t.Fatal("expected 400 non-identifier bad request to not be treated as not found")
+	}
 }
 
 func TestDecodeJWTClaims(t *testing.T) {
