@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -77,7 +78,7 @@ func TestValidateCSVStrictFailsMissingHeader(t *testing.T) {
 	if res.Errors != 1 {
 		t.Fatalf("expected exactly one error, got %+v", res)
 	}
-	if len(res.Issues) == 0 || res.Issues[0].Code != "MISSING_HEADER" {
+	if !hasIssueCode(res.Issues, "MISSING_HEADER") {
 		t.Fatalf("unexpected issues: %+v", res.Issues)
 	}
 }
@@ -122,6 +123,73 @@ func TestValidateCSVStrictAddsWhitespaceWarning(t *testing.T) {
 	}
 	if res.Issues[0].Code != "HEADER_WHITESPACE" {
 		t.Fatalf("unexpected issue code: %+v", res.Issues)
+	}
+}
+
+func TestReadCSVNormalizedTrimsHeadersAndValues(t *testing.T) {
+	t.Parallel()
+
+	path := writeTempFile(t, "trimmed.csv", " Group_Name , App_Name \n Sales Team , Company Portal \n")
+	data, err := readCSVNormalized(path)
+	if err != nil {
+		t.Fatalf("readCSVNormalized returned error: %v", err)
+	}
+	if strings.Join(data.Headers, "|") != "Group_Name|App_Name" {
+		t.Fatalf("unexpected normalized headers: %v", data.Headers)
+	}
+	if got := data.Rows[0]["Group_Name"]; got != "Sales Team" {
+		t.Fatalf("unexpected normalized group value: %q", got)
+	}
+	if got := data.Rows[0]["App_Name"]; got != "Company Portal" {
+		t.Fatalf("unexpected normalized app value: %q", got)
+	}
+}
+
+func TestValidateCSVStrictFailsDuplicateNormalizedHeaders(t *testing.T) {
+	t.Parallel()
+
+	path := writeTempFile(t, "dup-headers.csv", "Group_Name, Group_Name \nWorkstations,Servers\n")
+	res, err := validateCSVStrict(path, []string{"Group_Name"}, []string{"Group_Name"})
+	if err != nil {
+		t.Fatalf("validateCSVStrict returned error: %v", err)
+	}
+	if res.Pass {
+		t.Fatalf("expected duplicate normalized headers to fail, got %+v", res)
+	}
+	if !hasIssueCode(res.Issues, "DUPLICATE_HEADER") {
+		t.Fatalf("expected DUPLICATE_HEADER issue, got %+v", res.Issues)
+	}
+}
+
+func TestValidateCSVStrictFailsNoDataRows(t *testing.T) {
+	t.Parallel()
+
+	path := writeTempFile(t, "headers-only.csv", "User_Principal_Name\n")
+	res, err := validateCSVStrict(path, []string{"User_Principal_Name"}, []string{"User_Principal_Name"})
+	if err != nil {
+		t.Fatalf("validateCSVStrict returned error: %v", err)
+	}
+	if res.Pass {
+		t.Fatalf("expected headers-only CSV to fail, got %+v", res)
+	}
+	if !hasIssueCode(res.Issues, "NO_DATA_ROWS") {
+		t.Fatalf("expected NO_DATA_ROWS issue, got %+v", res.Issues)
+	}
+}
+
+func TestPreviewForActionUsesNormalizedHeaders(t *testing.T) {
+	t.Parallel()
+
+	path := writeTempFile(t, "apps-preview.csv", " Group_Name , App_Name \n Sales , Portal \n")
+	out, ok, err := previewForAction(actionSpec{id: actAddAppsCSV}, []string{path})
+	if err != nil {
+		t.Fatalf("previewForAction returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected previewForAction to handle actAddAppsCSV")
+	}
+	if !strings.Contains(out, "Sales") || !strings.Contains(out, "Portal") {
+		t.Fatalf("expected preview output to contain normalized values:\n%s", out)
 	}
 }
 
@@ -188,6 +256,20 @@ func TestFormatGraphErrorPrefersGraphEnvelope(t *testing.T) {
 	}
 }
 
+func TestIsGraphNotFound(t *testing.T) {
+	t.Parallel()
+
+	if !isGraphNotFound(formatGraphError("GET", "https://graph.microsoft.com/v1.0/groups/1", "404 Not Found", []byte(`{"error":{"code":"Request_ResourceNotFound","message":"Missing"}}`))) {
+		t.Fatal("expected 404 graph error to be treated as not found")
+	}
+	if isGraphNotFound(formatGraphError("GET", "https://graph.microsoft.com/v1.0/groups/1", "403 Forbidden", []byte(`{"error":{"code":"Authorization_RequestDenied","message":"Denied"}}`))) {
+		t.Fatal("expected 403 graph error to not be treated as not found")
+	}
+	if isGraphNotFound(errors.New("plain error")) {
+		t.Fatal("expected generic error to not be treated as not found")
+	}
+}
+
 func TestDecodeJWTClaims(t *testing.T) {
 	t.Parallel()
 
@@ -233,6 +315,33 @@ func TestValidateForActionMapsCSVActions(t *testing.T) {
 	}
 }
 
+func TestSelectUniqueMatch(t *testing.T) {
+	t.Parallel()
+
+	formatter := func(item map[string]any) string { return asString(item["displayName"]) + " | " + asString(item["id"]) }
+	if _, err := selectUniqueMatch("group", "Workstations", nil, formatter); !errors.Is(err, errNotFound) {
+		t.Fatalf("expected errNotFound, got %v", err)
+	}
+	item, err := selectUniqueMatch("group", "Workstations", []map[string]any{{"displayName": "Workstations", "id": "1"}}, formatter)
+	if err != nil {
+		t.Fatalf("unexpected error for unique match: %v", err)
+	}
+	if asString(item["id"]) != "1" {
+		t.Fatalf("unexpected selected item: %+v", item)
+	}
+	_, err = selectUniqueMatch("group", "Workstations", []map[string]any{
+		{"displayName": "Workstations", "id": "1"},
+		{"displayName": "Workstations", "id": "2"},
+	}, formatter)
+	var ambErr *ambiguousMatchError
+	if !errors.As(err, &ambErr) {
+		t.Fatalf("expected ambiguousMatchError, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "use object ID instead") {
+		t.Fatalf("unexpected ambiguity message: %v", err)
+	}
+}
+
 func TestClassifyWindowsVersion(t *testing.T) {
 	t.Parallel()
 
@@ -242,8 +351,11 @@ func TestClassifyWindowsVersion(t *testing.T) {
 		osVersion       string
 		want            string
 	}{
-		{name: "windows 11", operatingSystem: "Windows", osVersion: "10.0.22631", want: "Windows 11"},
-		{name: "windows 10", operatingSystem: "Windows", osVersion: "10.0.19045", want: "Windows 10"},
+		{name: "windows 11 3-part", operatingSystem: "Windows", osVersion: "10.0.22631", want: "Windows 11"},
+		{name: "windows 11 4-part", operatingSystem: "Windows", osVersion: "10.0.22631.3958", want: "Windows 11"},
+		{name: "windows 11 low revision", operatingSystem: "Windows", osVersion: "10.0.22621.1234", want: "Windows 11"},
+		{name: "windows 10 3-part", operatingSystem: "Windows", osVersion: "10.0.19045", want: "Windows 10"},
+		{name: "windows 10 4-part", operatingSystem: "Windows", osVersion: "10.0.19045.3803", want: "Windows 10"},
 		{name: "non windows", operatingSystem: "iOS", osVersion: "17.0", want: "Other/Unknown"},
 		{name: "bad version", operatingSystem: "Windows", osVersion: "unknown", want: "Other/Unknown"},
 	}
@@ -344,14 +456,77 @@ func TestHelpTextForState(t *testing.T) {
 	}
 }
 
+func TestWaitProgressCmdReturnsProgress(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan progressMsg, 1)
+	done := make(chan struct{})
+	ch <- progressMsg{text: "working"}
+	msg := waitProgressCmd(ch, done)()
+	got, ok := msg.(progressMsg)
+	if !ok || got.text != "working" {
+		t.Fatalf("unexpected progress message: %#v", msg)
+	}
+}
+
+func TestWaitProgressCmdStopsOnDone(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan progressMsg)
+	done := make(chan struct{})
+	close(done)
+	msg := waitProgressCmd(ch, done)()
+	if _, ok := msg.(progressStopMsg); !ok {
+		t.Fatalf("expected progressStopMsg, got %#v", msg)
+	}
+}
+
+func TestRenderTopFailingAppsReportExcludesZeroFailuresAndShowsSkipped(t *testing.T) {
+	t.Parallel()
+
+	out := renderTopFailingAppsReport([]appFailureStat{
+		{ID: "a1", Name: "Portal", Failed: 4, Total: 10},
+		{ID: "a2", Name: "VPN", Failed: 0, Total: 8},
+		{ID: "a3", Name: "Agent", Failed: 2, Total: 5},
+	}, failingAppsSummary{Scanned: 3, WithFailures: 2, Skipped: 1})
+	if !strings.Contains(out, "Apps skipped due to errors: 1") {
+		t.Fatalf("expected skipped count in report:\n%s", out)
+	}
+	if strings.Contains(out, "VPN") {
+		t.Fatalf("expected zero-failure app to be excluded:\n%s", out)
+	}
+	if !strings.Contains(out, "Portal") || !strings.Contains(out, "a1") {
+		t.Fatalf("expected ranked app and ID in report:\n%s", out)
+	}
+}
+
+func TestResolveTopFailingAppSelectionUsesAppIDAndRejectsAmbiguousName(t *testing.T) {
+	t.Parallel()
+
+	rows := [][]string{
+		{"1", "Portal", "app-1", "4", "10", "40.0%"},
+		{"2", "Portal", "app-2", "3", "6", "50.0%"},
+	}
+	got, err := resolveTopFailingAppSelection("1", rows)
+	if err != nil {
+		t.Fatalf("unexpected rank lookup error: %v", err)
+	}
+	if got != "app-1" {
+		t.Fatalf("expected app ID from rank lookup, got %q", got)
+	}
+	if _, err := resolveTopFailingAppSelection("Portal", rows); err == nil || !strings.Contains(err.Error(), "use rank instead") {
+		t.Fatalf("expected ambiguous app name error, got %v", err)
+	}
+}
+
 func TestResultSummaryViewIncludesStickyContext(t *testing.T) {
 	t.Parallel()
 
 	m := model{
-		client: &graphClient{cfg: authConfig{TenantID: "tenant-123", ClientID: "client-abc"}},
-		styles: newUIStyles(),
+		client:          &graphClient{cfg: authConfig{TenantID: "tenant-123", ClientID: "client-abc"}},
+		styles:          newUIStyles(),
 		lastActionLabel: "Top 10 Failing App Deployments",
-		lastHeaders: []string{"App", "Count"},
+		lastHeaders:     []string{"App", "Count"},
 		lastRows: [][]string{
 			{"Portal", "4"},
 			{"VPN", "2"},
@@ -372,6 +547,15 @@ func TestResultSummaryViewIncludesStickyContext(t *testing.T) {
 			t.Fatalf("expected summary to contain %q:\n%s", want, out)
 		}
 	}
+}
+
+func hasIssueCode(issues []csvIssue, code string) bool {
+	for _, issue := range issues {
+		if issue.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func writeTempFile(t *testing.T, name, contents string) string {

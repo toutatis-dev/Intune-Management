@@ -215,19 +215,77 @@ type graphErrorEnvelope struct {
 	} `json:"error"`
 }
 
+type graphRequestError struct {
+	Method     string
+	URL        string
+	Status     string
+	StatusCode int
+	Code       string
+	Message    string
+	Raw        string
+}
+
+func (e *graphRequestError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Code != "" {
+		return fmt.Sprintf("graph %s %s failed: %s | %s: %s", e.Method, e.URL, e.Status, e.Code, e.Message)
+	}
+	if e.Raw == "" {
+		return fmt.Sprintf("graph %s %s failed: %s", e.Method, e.URL, e.Status)
+	}
+	return fmt.Sprintf("graph %s %s failed: %s | %s", e.Method, e.URL, e.Status, e.Raw)
+}
+
+var (
+	errNotFound      = errors.New("not found")
+	errNoCSVDataRows = errors.New("csv has no data rows")
+)
+
 func formatGraphError(method, fullURL, status string, raw []byte) error {
+	statusCode := 0
+	if parts := strings.Fields(status); len(parts) > 0 {
+		statusCode, _ = strconv.Atoi(parts[0])
+	}
 	var env graphErrorEnvelope
 	if err := json.Unmarshal(raw, &env); err == nil && env.Error.Code != "" {
-		return fmt.Errorf("graph %s %s failed: %s | %s: %s", method, fullURL, status, env.Error.Code, env.Error.Message)
+		return &graphRequestError{
+			Method:     method,
+			URL:        fullURL,
+			Status:     status,
+			StatusCode: statusCode,
+			Code:       env.Error.Code,
+			Message:    env.Error.Message,
+		}
 	}
 	msg := strings.TrimSpace(string(raw))
-	if msg == "" {
-		return fmt.Errorf("graph %s %s failed: %s", method, fullURL, status)
-	}
 	if len(msg) > 500 {
 		msg = msg[:500] + "..."
 	}
-	return fmt.Errorf("graph %s %s failed: %s | %s", method, fullURL, status, msg)
+	return &graphRequestError{
+		Method:     method,
+		URL:        fullURL,
+		Status:     status,
+		StatusCode: statusCode,
+		Raw:        msg,
+	}
+}
+
+func isGraphNotFound(err error) bool {
+	var reqErr *graphRequestError
+	if !errors.As(err, &reqErr) {
+		return false
+	}
+	if reqErr.StatusCode == http.StatusNotFound {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(reqErr.Code)) {
+	case "itemnotfound", "request_resourcenotfound", "resourcenotfound", "directoryobjectnotfound":
+		return true
+	default:
+		return false
+	}
 }
 
 func shouldRetryStatus(status int) bool {
@@ -484,16 +542,103 @@ func exportCSV(path string, headers []string, rows [][]string) error {
 	return w.Error()
 }
 
-func (g *graphClient) findGroupByDisplayName(ctx context.Context, name string) (map[string]any, error) {
+type ambiguousMatchError struct {
+	ObjectType string
+	Name       string
+	Candidates []string
+}
+
+func (e *ambiguousMatchError) Error() string {
+	if e == nil {
+		return ""
+	}
+	msg := fmt.Sprintf("multiple %ss found with display name %q; use object ID instead", e.ObjectType, e.Name)
+	if len(e.Candidates) == 0 {
+		return msg
+	}
+	return msg + "\n\n" + strings.Join(e.Candidates, "\n")
+}
+
+func selectUniqueMatch(objectType, identifier string, items []map[string]any, formatter func(map[string]any) string) (map[string]any, error) {
+	switch len(items) {
+	case 0:
+		return nil, fmt.Errorf("%s %w", objectType, errNotFound)
+	case 1:
+		return items[0], nil
+	default:
+		candidates := make([]string, 0, minInt(10, len(items)))
+		for i, item := range items {
+			if i >= 10 {
+				break
+			}
+			candidates = append(candidates, formatter(item))
+		}
+		if len(items) > len(candidates) {
+			candidates = append(candidates, fmt.Sprintf("...and %d more", len(items)-len(candidates)))
+		}
+		return nil, &ambiguousMatchError{
+			ObjectType: objectType,
+			Name:       identifier,
+			Candidates: candidates,
+		}
+	}
+}
+
+func formatGroupCandidate(item map[string]any) string {
+	return fmt.Sprintf("%s | %s", asString(item["displayName"]), asString(item["id"]))
+}
+
+func formatUserCandidate(item map[string]any) string {
+	return fmt.Sprintf("%s | %s | %s", asString(item["displayName"]), asString(item["userPrincipalName"]), asString(item["id"]))
+}
+
+func formatDeviceCandidate(item map[string]any) string {
+	return fmt.Sprintf("%s | %s | %s", asString(item["displayName"]), asString(item["deviceId"]), asString(item["id"]))
+}
+
+func formatAppCandidate(item map[string]any) string {
+	return fmt.Sprintf("%s | %s", asString(item["displayName"]), asString(item["id"]))
+}
+
+func (g *graphClient) findUniqueByDisplayName(ctx context.Context, path, selectFields, objectType, name string, formatter func(map[string]any) string) (map[string]any, error) {
 	filter := url.QueryEscape(fmt.Sprintf("displayName eq '%s'", escapeOData(name)))
-	items, err := g.list(ctx, "/groups?$select=id,displayName&$filter="+filter)
+	items, err := g.list(ctx, fmt.Sprintf("%s?$select=%s&$filter=%s", path, selectFields, filter))
 	if err != nil {
 		return nil, err
 	}
-	if len(items) == 0 {
-		return nil, errors.New("group not found")
+	return selectUniqueMatch(objectType, name, items, formatter)
+}
+
+func (g *graphClient) findGroupByDisplayName(ctx context.Context, name string) (map[string]any, error) {
+	group, err := g.findUniqueByDisplayName(ctx, "/groups", "id,displayName", "group", name, formatGroupCandidate)
+	if errors.Is(err, errNotFound) {
+		return nil, fmt.Errorf("group %w", errNotFound)
 	}
-	return items[0], nil
+	return group, err
+}
+
+func (g *graphClient) findUserByDisplayName(ctx context.Context, name string) (map[string]any, error) {
+	user, err := g.findUniqueByDisplayName(ctx, "/users", "id,displayName,userPrincipalName,accountEnabled", "user", name, formatUserCandidate)
+	if errors.Is(err, errNotFound) {
+		return nil, fmt.Errorf("user %w", errNotFound)
+	}
+	return user, err
+}
+
+func (g *graphClient) findDeviceByDisplayName(ctx context.Context, name string) (map[string]any, error) {
+	device, err := g.findUniqueByDisplayName(ctx, "/devices", "id,displayName,deviceId,operatingSystem,accountEnabled", "device", name, formatDeviceCandidate)
+	if errors.Is(err, errNotFound) {
+		return nil, fmt.Errorf("device %w", errNotFound)
+	}
+	return device, err
+}
+
+func (g *graphClient) findAppByDisplayName(ctx context.Context, name string) (map[string]any, error) {
+	app, err := g.findUniqueByDisplayName(ctx, "/deviceAppManagement/mobileApps", "id,displayName,publisher", "app", name, formatAppCandidate)
+	if errors.Is(err, errNotFound) {
+		return nil, fmt.Errorf("app %w", errNotFound)
+	}
+	return app, err
 }
 
 func (g *graphClient) listUsersInGroup(ctx context.Context, groupName string) (string, error) {
@@ -628,7 +773,7 @@ func classifyWindowsVersion(operatingSystem, osVersion string) string {
 	if len(parts) < 3 {
 		return "Other/Unknown"
 	}
-	build, err := strconv.Atoi(parts[len(parts)-1])
+	build, err := strconv.Atoi(parts[2])
 	if err != nil {
 		return "Other/Unknown"
 	}
@@ -667,63 +812,98 @@ func (g *graphClient) reportWindowsBreakdown(ctx context.Context) (string, error
 	), nil
 }
 
+type appFailureStat struct {
+	ID     string
+	Name   string
+	Failed int
+	Total  int
+}
+
+type failingAppsSummary struct {
+	Scanned      int
+	WithFailures int
+	Skipped      int
+}
+
+func rankFailingApps(stats []appFailureStat) []appFailureStat {
+	filtered := make([]appFailureStat, 0, len(stats))
+	for _, stat := range stats {
+		if stat.Failed > 0 {
+			filtered = append(filtered, stat)
+		}
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].Failed == filtered[j].Failed {
+			return strings.ToLower(filtered[i].Name) < strings.ToLower(filtered[j].Name)
+		}
+		return filtered[i].Failed > filtered[j].Failed
+	})
+	if len(filtered) > 10 {
+		filtered = filtered[:10]
+	}
+	return filtered
+}
+
+func renderTopFailingAppsReport(stats []appFailureStat, summary failingAppsSummary) string {
+	ranked := rankFailingApps(stats)
+	if len(ranked) == 0 {
+		if summary.Skipped > 0 {
+			return fmt.Sprintf("Top 10 Failing App Deployments\n\nApps scanned: %d\nApps with failures: 0\nApps skipped due to errors: %d\n\nNo failing app deployments found from successful app status queries.", summary.Scanned, summary.Skipped)
+		}
+		return fmt.Sprintf("Top 10 Failing App Deployments\n\nApps scanned: %d\nApps with failures: 0\nApps skipped due to errors: 0\n\nNo failing app deployments found.", summary.Scanned)
+	}
+	rows := make([][]string, 0, len(ranked))
+	for i, stat := range ranked {
+		rate := "0.0%"
+		if stat.Total > 0 {
+			rate = fmt.Sprintf("%.1f%%", (float64(stat.Failed)/float64(stat.Total))*100)
+		}
+		rows = append(rows, []string{
+			fmt.Sprintf("%d", i+1),
+			stat.Name,
+			stat.ID,
+			fmt.Sprintf("%d", stat.Failed),
+			fmt.Sprintf("%d", stat.Total),
+			rate,
+		})
+	}
+	return fmt.Sprintf("Top 10 Failing App Deployments\n\nApps scanned: %d\nApps with failures: %d\nApps skipped due to errors: %d\n\n%s",
+		summary.Scanned,
+		summary.WithFailures,
+		summary.Skipped,
+		renderTable([]string{"Rank", "App", "App ID", "Failed Devices", "Total Statuses", "Failure Rate"}, rows),
+	)
+}
+
 func (g *graphClient) reportTopFailingApps(ctx context.Context) (string, error) {
 	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName")
 	if err != nil {
 		return "", err
 	}
-	type appFail struct {
-		Name   string
-		Failed int
-		Total  int
-	}
-	agg := make([]appFail, 0, len(apps))
+	stats := make([]appFailureStat, 0, len(apps))
+	summary := failingAppsSummary{Scanned: len(apps)}
 	for i, app := range apps {
 		if (i+1)%20 == 0 {
 			g.emitProgress(fmt.Sprintf("Processed %d/%d apps...", i+1, len(apps)))
 		}
 		appID := asString(app["id"])
-		name := asString(app["displayName"])
 		statuses, err := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/deviceStatuses?$select=installState,deviceId", appID))
 		if err != nil {
+			summary.Skipped++
 			continue
 		}
-		failed := 0
-		total := 0
+		stat := appFailureStat{ID: appID, Name: asString(app["displayName"]), Total: len(statuses)}
 		for _, s := range statuses {
-			total++
 			if strings.EqualFold(strings.TrimSpace(asString(s["installState"])), "failed") {
-				failed++
+				stat.Failed++
 			}
 		}
-		agg = append(agg, appFail{Name: name, Failed: failed, Total: total})
-	}
-	sort.Slice(agg, func(i, j int) bool {
-		if agg[i].Failed == agg[j].Failed {
-			return strings.ToLower(agg[i].Name) < strings.ToLower(agg[j].Name)
+		if stat.Failed > 0 {
+			summary.WithFailures++
+			stats = append(stats, stat)
 		}
-		return agg[i].Failed > agg[j].Failed
-	})
-
-	limit := 10
-	if len(agg) < limit {
-		limit = len(agg)
 	}
-	rows := make([][]string, 0, limit)
-	for i := 0; i < limit; i++ {
-		r := agg[i]
-		rate := "0.0%"
-		if r.Total > 0 {
-			rate = fmt.Sprintf("%.1f%%", (float64(r.Failed)/float64(r.Total))*100)
-		}
-		rows = append(rows, []string{fmt.Sprintf("%d", i+1), r.Name, fmt.Sprintf("%d", r.Failed), fmt.Sprintf("%d", r.Total), rate})
-	}
-	if len(rows) == 0 {
-		return "Top 10 Failing App Deployments\n\nNo app status data found.", nil
-	}
-	return fmt.Sprintf("Top 10 Failing App Deployments\n\n%s",
-		renderTable([]string{"Rank", "App", "Failed Devices", "Total Statuses", "Failure Rate"}, rows),
-	), nil
+	return renderTopFailingAppsReport(stats, summary), nil
 }
 
 func (g *graphClient) reportAppFailureDetails(ctx context.Context, identifier string) (string, error) {
@@ -733,16 +913,16 @@ func (g *graphClient) reportAppFailureDetails(ctx context.Context, identifier st
 		if err := json.Unmarshal(body, &app); err != nil {
 			return "", err
 		}
-	} else {
-		filter := url.QueryEscape(fmt.Sprintf("displayName eq '%s'", escapeOData(identifier)))
-		items, ferr := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName&$filter="+filter)
-		if ferr != nil {
-			return "", ferr
-		}
-		if len(items) == 0 {
+	} else if isGraphNotFound(err) {
+		app, err = g.findUniqueByDisplayName(ctx, "/deviceAppManagement/mobileApps", "id,displayName", "app", identifier, formatAppCandidate)
+		if errors.Is(err, errNotFound) {
 			return "", errors.New("app not found")
 		}
-		app = items[0]
+		if err != nil {
+			return "", err
+		}
+	} else {
+		return "", err
 	}
 
 	statuses, err := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/deviceStatuses", url.PathEscape(asString(app["id"]))))
@@ -791,26 +971,26 @@ func (g *graphClient) inspectUser(ctx context.Context, identifier string) (strin
 		if err != nil {
 			return "", err
 		}
-		if len(items) == 0 {
+		user, err = selectUniqueMatch("user", identifier, items, formatUserCandidate)
+		if errors.Is(err, errNotFound) {
 			return "", errors.New("user not found")
 		}
-		user = items[0]
+		if err != nil {
+			return "", err
+		}
 	} else {
 		body, err := g.do(ctx, http.MethodGet, graphBase+"/users/"+url.PathEscape(identifier)+"?$select=id,displayName,userPrincipalName,accountEnabled", nil)
 		if err == nil {
 			if err := json.Unmarshal(body, &user); err != nil {
 				return "", err
 			}
+		} else if isGraphNotFound(err) {
+			user, err = g.findUserByDisplayName(ctx, identifier)
+			if err != nil {
+				return "", err
+			}
 		} else {
-			filter := url.QueryEscape(fmt.Sprintf("displayName eq '%s'", escapeOData(identifier)))
-			items, ferr := g.list(ctx, "/users?$select=id,displayName,userPrincipalName,accountEnabled&$filter="+filter)
-			if ferr != nil {
-				return "", ferr
-			}
-			if len(items) == 0 {
-				return "", errors.New("user not found")
-			}
-			user = items[0]
+			return "", err
 		}
 	}
 	return renderInspector("User Inspector", [][2]string{
@@ -828,16 +1008,16 @@ func (g *graphClient) inspectGroup(ctx context.Context, identifier string) (stri
 		if err := json.Unmarshal(body, &group); err != nil {
 			return "", err
 		}
-	} else {
-		filter := url.QueryEscape(fmt.Sprintf("displayName eq '%s'", escapeOData(identifier)))
-		items, ferr := g.list(ctx, "/groups?$select=id,displayName,description,mailNickname,securityEnabled,mailEnabled&$filter="+filter)
-		if ferr != nil {
-			return "", ferr
-		}
-		if len(items) == 0 {
+	} else if isGraphNotFound(err) {
+		group, err = g.findUniqueByDisplayName(ctx, "/groups", "id,displayName,description,mailNickname,securityEnabled,mailEnabled", "group", identifier, formatGroupCandidate)
+		if errors.Is(err, errNotFound) {
 			return "", errors.New("group not found")
 		}
-		group = items[0]
+		if err != nil {
+			return "", err
+		}
+	} else {
+		return "", err
 	}
 	return renderInspector("Group Inspector", [][2]string{
 		{"Display Name", asString(group["displayName"])},
@@ -856,16 +1036,13 @@ func (g *graphClient) inspectDevice(ctx context.Context, identifier string) (str
 		if err := json.Unmarshal(body, &device); err != nil {
 			return "", err
 		}
+	} else if isGraphNotFound(err) {
+		device, err = g.findDeviceByDisplayName(ctx, identifier)
+		if err != nil {
+			return "", err
+		}
 	} else {
-		filter := url.QueryEscape(fmt.Sprintf("displayName eq '%s'", escapeOData(identifier)))
-		items, ferr := g.list(ctx, "/devices?$select=id,displayName,deviceId,operatingSystem,accountEnabled&$filter="+filter)
-		if ferr != nil {
-			return "", ferr
-		}
-		if len(items) == 0 {
-			return "", errors.New("device not found")
-		}
-		device = items[0]
+		return "", err
 	}
 	return renderInspector("Device Inspector", [][2]string{
 		{"Display Name", asString(device["displayName"])},
@@ -883,16 +1060,13 @@ func (g *graphClient) inspectApp(ctx context.Context, identifier string) (string
 		if err := json.Unmarshal(body, &app); err != nil {
 			return "", err
 		}
+	} else if isGraphNotFound(err) {
+		app, err = g.findAppByDisplayName(ctx, identifier)
+		if err != nil {
+			return "", err
+		}
 	} else {
-		filter := url.QueryEscape(fmt.Sprintf("displayName eq '%s'", escapeOData(identifier)))
-		items, ferr := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName,publisher&$filter="+filter)
-		if ferr != nil {
-			return "", ferr
-		}
-		if len(items) == 0 {
-			return "", errors.New("app not found")
-		}
-		app = items[0]
+		return "", err
 	}
 
 	assignments, assignErr := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/assignments?$select=id", url.PathEscape(asString(app["id"]))))
@@ -935,36 +1109,6 @@ func (g *graphClient) listDevicesInGroup(ctx context.Context, groupName string) 
 	), nil
 }
 
-func readCSV(path string) ([]map[string]string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	r := csv.NewReader(f)
-	rows, err := r.ReadAll()
-	if err != nil {
-		return nil, err
-	}
-	if len(rows) < 2 {
-		return nil, errors.New("csv has no data rows")
-	}
-	headers := rows[0]
-	out := make([]map[string]string, 0, len(rows)-1)
-	for _, row := range rows[1:] {
-		item := map[string]string{}
-		for i := range headers {
-			if i < len(row) {
-				item[headers[i]] = row[i]
-			} else {
-				item[headers[i]] = ""
-			}
-		}
-		out = append(out, item)
-	}
-	return out, nil
-}
-
 type csvIssue struct {
 	Severity string
 	Row      int
@@ -982,6 +1126,127 @@ type csvValidationResult struct {
 	Pass     bool
 }
 
+type csvDataset struct {
+	Headers         []string
+	OriginalHeaders []string
+	Rows            []map[string]string
+}
+
+func countCSVSeverity(issues []csvIssue, severity string) int {
+	total := 0
+	for _, issue := range issues {
+		if issue.Severity == severity {
+			total++
+		}
+	}
+	return total
+}
+
+func normalizeCSVHeaders(headers []string, requiredHeaders map[string]struct{}) ([]string, []csvIssue) {
+	normalized := make([]string, len(headers))
+	issues := make([]csvIssue, 0)
+	seen := map[string]int{}
+	for i, h := range headers {
+		trimmed := strings.TrimSpace(h)
+		normalized[i] = trimmed
+		if trimmed != h {
+			issues = append(issues, csvIssue{
+				Severity: "Warning",
+				Row:      1,
+				Field:    h,
+				Code:     "HEADER_WHITESPACE",
+				Message:  "Header has leading/trailing whitespace",
+			})
+		}
+		if first, exists := seen[trimmed]; exists {
+			issues = append(issues, csvIssue{
+				Severity: "Error",
+				Row:      1,
+				Field:    trimmed,
+				Code:     "DUPLICATE_HEADER",
+				Message:  fmt.Sprintf("Duplicate header after normalization; first seen in column %d", first+1),
+			})
+			continue
+		}
+		seen[trimmed] = i
+		if len(requiredHeaders) > 0 {
+			if _, ok := requiredHeaders[trimmed]; !ok && trimmed != "" {
+				issues = append(issues, csvIssue{
+					Severity: "Warning",
+					Row:      1,
+					Field:    trimmed,
+					Code:     "EXTRA_HEADER",
+					Message:  "Header is not used by this workflow",
+				})
+			}
+		}
+	}
+	return normalized, issues
+}
+
+func hasCSVError(issues []csvIssue) bool {
+	for _, issue := range issues {
+		if issue.Severity == "Error" {
+			return true
+		}
+	}
+	return false
+}
+
+func readCSVNormalized(path string) (csvDataset, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return csvDataset{}, err
+	}
+	defer f.Close()
+	r := csv.NewReader(f)
+	rows, err := r.ReadAll()
+	if err != nil {
+		return csvDataset{}, err
+	}
+	if len(rows) == 0 {
+		return csvDataset{}, io.EOF
+	}
+	normalizedHeaders, issues := normalizeCSVHeaders(rows[0], nil)
+	if hasCSVError(issues) {
+		return csvDataset{}, errors.New(formatValidationReport("CSV Parse Failed", csvValidationResult{
+			FilePath: path,
+			Errors:   countCSVSeverity(issues, "Error"),
+			Warnings: countCSVSeverity(issues, "Warning"),
+			Issues:   issues,
+			Pass:     false,
+		}))
+	}
+	if len(rows) < 2 {
+		return csvDataset{}, errNoCSVDataRows
+	}
+	data := csvDataset{
+		Headers:         normalizedHeaders,
+		OriginalHeaders: append([]string(nil), rows[0]...),
+		Rows:            make([]map[string]string, 0, len(rows)-1),
+	}
+	for _, row := range rows[1:] {
+		item := make(map[string]string, len(normalizedHeaders))
+		for i, header := range normalizedHeaders {
+			val := ""
+			if i < len(row) {
+				val = strings.TrimSpace(row[i])
+			}
+			item[header] = val
+		}
+		data.Rows = append(data.Rows, item)
+	}
+	return data, nil
+}
+
+func readCSV(path string) ([]map[string]string, error) {
+	data, err := readCSVNormalized(path)
+	if err != nil {
+		return nil, err
+	}
+	return data.Rows, nil
+}
+
 func validateCSVStrict(path string, requiredHeaders, keyColumns []string) (csvValidationResult, error) {
 	res := csvValidationResult{FilePath: path, Pass: true}
 	f, err := os.Open(path)
@@ -989,17 +1254,26 @@ func validateCSVStrict(path string, requiredHeaders, keyColumns []string) (csvVa
 		return res, err
 	}
 	defer f.Close()
-
 	r := csv.NewReader(f)
-	headers, err := r.Read()
+	rows, err := r.ReadAll()
 	if err != nil {
 		return res, err
 	}
-	headerMap := map[string]int{}
-	for i, h := range headers {
-		headerMap[strings.TrimSpace(h)] = i
+	if len(rows) == 0 {
+		return res, io.EOF
 	}
-
+	requiredSet := make(map[string]struct{}, len(requiredHeaders))
+	for _, req := range requiredHeaders {
+		requiredSet[req] = struct{}{}
+	}
+	normalizedHeaders, issues := normalizeCSVHeaders(rows[0], requiredSet)
+	res.Issues = append(res.Issues, issues...)
+	headerMap := map[string]int{}
+	for i, h := range normalizedHeaders {
+		if _, exists := headerMap[h]; !exists {
+			headerMap[h] = i
+		}
+	}
 	for _, req := range requiredHeaders {
 		if _, ok := headerMap[req]; !ok {
 			res.Issues = append(res.Issues, csvIssue{
@@ -1008,46 +1282,37 @@ func validateCSVStrict(path string, requiredHeaders, keyColumns []string) (csvVa
 			})
 		}
 	}
-	if len(res.Issues) > 0 {
-		res.Errors = len(res.Issues)
+	if len(rows) < 2 {
+		res.Issues = append(res.Issues, csvIssue{
+			Severity: "Error",
+			Row:      1,
+			Field:    "",
+			Code:     "NO_DATA_ROWS",
+			Message:  "CSV contains headers but no data rows",
+		})
+	}
+	if hasCSVError(res.Issues) {
+		res.Errors = countCSVSeverity(res.Issues, "Error")
+		res.Warnings = countCSVSeverity(res.Issues, "Warning")
 		res.Pass = false
 		return res, nil
 	}
 
-	for _, h := range headers {
-		trim := strings.TrimSpace(h)
-		if trim != h {
-			res.Issues = append(res.Issues, csvIssue{
-				Severity: "Warning", Row: 1, Field: h, Code: "HEADER_WHITESPACE",
-				Message: "Header has leading/trailing whitespace",
-			})
-		}
-	}
-
 	seen := map[string]int{}
-	rowNum := 1
-	for {
-		row, readErr := r.Read()
-		if readErr == io.EOF {
-			break
-		}
-		rowNum++
-		if readErr != nil {
-			res.Issues = append(res.Issues, csvIssue{
-				Severity: "Error", Row: rowNum, Field: "", Code: "MALFORMED_ROW",
-				Message: readErr.Error(),
-			})
-			continue
-		}
+	for i, row := range rows[1:] {
+		rowNum := i + 2
 		res.Rows++
-		keyParts := make([]string, 0, len(keyColumns))
-		for _, req := range requiredHeaders {
-			idx := headerMap[req]
+		item := make(map[string]string, len(normalizedHeaders))
+		for idx, header := range normalizedHeaders {
 			val := ""
 			if idx < len(row) {
 				val = strings.TrimSpace(row[idx])
 			}
-			if val == "" {
+			item[header] = val
+		}
+		keyParts := make([]string, 0, len(keyColumns))
+		for _, req := range requiredHeaders {
+			if item[req] == "" {
 				res.Issues = append(res.Issues, csvIssue{
 					Severity: "Error", Row: rowNum, Field: req, Code: "MISSING_REQUIRED_VALUE",
 					Message: "Required value is empty",
@@ -1055,12 +1320,7 @@ func validateCSVStrict(path string, requiredHeaders, keyColumns []string) (csvVa
 			}
 		}
 		for _, k := range keyColumns {
-			idx := headerMap[k]
-			val := ""
-			if idx < len(row) {
-				val = strings.ToLower(strings.TrimSpace(row[idx]))
-			}
-			keyParts = append(keyParts, val)
+			keyParts = append(keyParts, strings.ToLower(item[k]))
 		}
 		key := strings.Join(keyParts, "|")
 		if key != "" {
@@ -1074,14 +1334,8 @@ func validateCSVStrict(path string, requiredHeaders, keyColumns []string) (csvVa
 			}
 		}
 	}
-
-	for _, i := range res.Issues {
-		if i.Severity == "Error" {
-			res.Errors++
-		} else if i.Severity == "Warning" {
-			res.Warnings++
-		}
-	}
+	res.Errors = countCSVSeverity(res.Issues, "Error")
+	res.Warnings = countCSVSeverity(res.Issues, "Warning")
 	res.Pass = res.Errors == 0
 	return res, nil
 }
@@ -1131,12 +1385,12 @@ func validateForAction(spec actionSpec, inputs []string) (csvValidationResult, b
 func previewForAction(spec actionSpec, inputs []string) (string, bool, error) {
 	switch spec.id {
 	case actAddUsersCSV:
-		rows, err := readCSV(inputs[0])
+		data, err := readCSVNormalized(inputs[0])
 		if err != nil {
 			return "", true, err
 		}
-		sample := make([][]string, 0, minInt(10, len(rows)))
-		for i, row := range rows {
+		sample := make([][]string, 0, minInt(10, len(data.Rows)))
+		for i, row := range data.Rows {
 			if i >= 10 {
 				break
 			}
@@ -1145,17 +1399,17 @@ func previewForAction(spec actionSpec, inputs []string) (string, bool, error) {
 		return fmt.Sprintf("Preview - Bulk Add Users\n\nCSV: %s\nTarget Group: %s\nRows: %d\nShowing first %d rows\n\n%s",
 			inputs[0],
 			inputs[1],
-			len(rows),
+			len(data.Rows),
 			len(sample),
 			renderTable([]string{"User Principal Name"}, sample),
 		), true, nil
 	case actMakeGroupsCSV:
-		rows, err := readCSV(inputs[0])
+		data, err := readCSVNormalized(inputs[0])
 		if err != nil {
 			return "", true, err
 		}
-		sample := make([][]string, 0, minInt(10, len(rows)))
-		for i, row := range rows {
+		sample := make([][]string, 0, minInt(10, len(data.Rows)))
+		for i, row := range data.Rows {
 			if i >= 10 {
 				break
 			}
@@ -1163,17 +1417,17 @@ func previewForAction(spec actionSpec, inputs []string) (string, bool, error) {
 		}
 		return fmt.Sprintf("Preview - Create Groups\n\nCSV: %s\nRows: %d\nShowing first %d rows\n\n%s",
 			inputs[0],
-			len(rows),
+			len(data.Rows),
 			len(sample),
 			renderTable([]string{"Group Name"}, sample),
 		), true, nil
 	case actAddAppsCSV:
-		rows, err := readCSV(inputs[0])
+		data, err := readCSVNormalized(inputs[0])
 		if err != nil {
 			return "", true, err
 		}
-		sample := make([][]string, 0, minInt(10, len(rows)))
-		for i, row := range rows {
+		sample := make([][]string, 0, minInt(10, len(data.Rows)))
+		for i, row := range data.Rows {
 			if i >= 10 {
 				break
 			}
@@ -1181,7 +1435,7 @@ func previewForAction(spec actionSpec, inputs []string) (string, bool, error) {
 		}
 		return fmt.Sprintf("Preview - Assign Apps\n\nCSV: %s\nRows: %d\nShowing first %d rows\n\n%s",
 			inputs[0],
-			len(rows),
+			len(data.Rows),
 			len(sample),
 			renderTable([]string{"Group Name", "App Name"}, sample),
 		), true, nil
@@ -1197,22 +1451,29 @@ func resolveTopFailingAppSelection(input string, rows [][]string) (string, error
 	}
 	if rank, err := strconv.Atoi(trimmed); err == nil {
 		for _, row := range rows {
-			if len(row) >= 2 && row[0] == fmt.Sprintf("%d", rank) {
-				return row[1], nil
+			if len(row) >= 3 && row[0] == fmt.Sprintf("%d", rank) {
+				return row[2], nil
 			}
 		}
 		return "", errors.New("rank not found in current report")
 	}
+	matches := make([][]string, 0)
 	for _, row := range rows {
-		if len(row) >= 2 && strings.EqualFold(strings.TrimSpace(row[1]), trimmed) {
-			return row[1], nil
+		if len(row) >= 3 && strings.EqualFold(strings.TrimSpace(row[1]), trimmed) {
+			matches = append(matches, row)
 		}
+	}
+	if len(matches) == 1 {
+		return matches[0][2], nil
+	}
+	if len(matches) > 1 {
+		return "", errors.New("app name matches multiple rows; use rank instead")
 	}
 	return "", errors.New("app not found in current report")
 }
 
 func (g *graphClient) addUsersCSV(ctx context.Context, csvPath, groupName string, dryRun bool) (string, error) {
-	rows, err := readCSV(csvPath)
+	data, err := readCSVNormalized(csvPath)
 	if err != nil {
 		return "", err
 	}
@@ -1223,7 +1484,7 @@ func (g *graphClient) addUsersCSV(ctx context.Context, csvPath, groupName string
 	groupID := asString(group["id"])
 
 	var b strings.Builder
-	for _, row := range rows {
+	for _, row := range data.Rows {
 		upn := row["User_Principal_Name"]
 		if upn == "" {
 			fmt.Fprintf(&b, "Skipped row: missing User_Principal_Name\n")
@@ -1231,7 +1492,11 @@ func (g *graphClient) addUsersCSV(ctx context.Context, csvPath, groupName string
 		}
 		filter := url.QueryEscape(fmt.Sprintf("userPrincipalName eq '%s'", escapeOData(upn)))
 		users, err := g.list(ctx, "/users?$select=id,userPrincipalName&$filter="+filter)
-		if err != nil || len(users) == 0 {
+		if err != nil {
+			fmt.Fprintf(&b, "Failed to look up user %s: %v\n", upn, err)
+			continue
+		}
+		if len(users) == 0 {
 			fmt.Fprintf(&b, "User not found: %s\n", upn)
 			continue
 		}
@@ -1254,12 +1519,12 @@ func (g *graphClient) addUsersCSV(ctx context.Context, csvPath, groupName string
 }
 
 func (g *graphClient) makeGroupsCSV(ctx context.Context, csvPath string, dryRun bool) (string, error) {
-	rows, err := readCSV(csvPath)
+	data, err := readCSVNormalized(csvPath)
 	if err != nil {
 		return "", err
 	}
 	var b strings.Builder
-	for _, row := range rows {
+	for _, row := range data.Rows {
 		groupName := row["Group_Name"]
 		if groupName == "" {
 			fmt.Fprintf(&b, "Skipped row: missing Group_Name\n")
@@ -1268,6 +1533,10 @@ func (g *graphClient) makeGroupsCSV(ctx context.Context, csvPath string, dryRun 
 		_, err := g.findGroupByDisplayName(ctx, groupName)
 		if err == nil {
 			fmt.Fprintf(&b, "Exists: %s\n", groupName)
+			continue
+		}
+		if !errors.Is(err, errNotFound) {
+			fmt.Fprintf(&b, "Failed to check existing group %s: %v\n", groupName, err)
 			continue
 		}
 		body := map[string]any{
@@ -1292,30 +1561,28 @@ func (g *graphClient) makeGroupsCSV(ctx context.Context, csvPath string, dryRun 
 }
 
 func (g *graphClient) addAppsCSV(ctx context.Context, csvPath string, dryRun bool) (string, error) {
-	rows, err := readCSV(csvPath)
+	data, err := readCSVNormalized(csvPath)
 	if err != nil {
 		return "", err
 	}
 	var b strings.Builder
-	for _, row := range rows {
+	for _, row := range data.Rows {
 		appName := row["App_Name"]
 		groupName := row["Group_Name"]
 		if appName == "" || groupName == "" {
 			fmt.Fprintf(&b, "Skipped row: missing App_Name or Group_Name\n")
 			continue
 		}
-
-		appFilter := url.QueryEscape(fmt.Sprintf("displayName eq '%s'", escapeOData(appName)))
-		apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName&$filter="+appFilter)
-		if err != nil || len(apps) == 0 {
-			fmt.Fprintf(&b, "App not found: %s\n", appName)
+		app, err := g.findAppByDisplayName(ctx, appName)
+		if err != nil {
+			fmt.Fprintf(&b, "App lookup failed for %s: %v\n", appName, err)
 			continue
 		}
-		appID := asString(apps[0]["id"])
+		appID := asString(app["id"])
 
 		group, err := g.findGroupByDisplayName(ctx, groupName)
 		if err != nil {
-			fmt.Fprintf(&b, "Group not found: %s\n", groupName)
+			fmt.Fprintf(&b, "Group lookup failed for %s: %v\n", groupName, err)
 			continue
 		}
 		groupID := asString(group["id"])
@@ -1471,6 +1738,8 @@ type progressMsg struct {
 	text string
 }
 
+type progressStopMsg struct{}
+
 type confirmKind int
 
 const (
@@ -1521,6 +1790,8 @@ type model struct {
 	pendingExportPath  string
 	dryRun             bool
 	progressCh         chan progressMsg
+	progressDone       chan struct{}
+	progressActive     bool
 	progressText       string
 	helpReturnState    menuState
 	lastActionID       actionID
@@ -2022,11 +2293,35 @@ func (m *model) clearConfirm() {
 	m.pendingExportPath = ""
 }
 
-func waitProgressCmd(ch <-chan progressMsg) tea.Cmd {
+func waitProgressCmd(ch <-chan progressMsg, done <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
-		msg := <-ch
-		return msg
+		select {
+		case msg := <-ch:
+			return msg
+		case <-done:
+			return progressStopMsg{}
+		}
 	}
+}
+
+func (m *model) startWorking() {
+	if m.progressActive && m.progressDone != nil {
+		close(m.progressDone)
+	}
+	m.progressDone = make(chan struct{})
+	m.progressActive = true
+	m.state = stateWorking
+	m.output = ""
+	m.progressText = "Starting operation..."
+}
+
+func (m *model) stopWorking() {
+	if m.progressActive && m.progressDone != nil {
+		close(m.progressDone)
+	}
+	m.progressDone = nil
+	m.progressActive = false
+	m.progressText = ""
 }
 
 func specForAction(id actionID) actionSpec {
@@ -2311,10 +2606,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							}
 							return m, nil
 						}
-						m.state = stateWorking
-						m.output = ""
-						m.progressText = "Starting operation..."
-						return m, tea.Batch(m.spin.Tick, waitProgressCmd(m.progressCh), m.runActionCmd(spec, nil))
+						m.startWorking()
+						return m, tea.Batch(m.spin.Tick, waitProgressCmd(m.progressCh, m.progressDone), m.runActionCmd(spec, nil))
 					}
 					m.currentSpec = spec
 					m.inputs = nil
@@ -2401,10 +2694,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, nil
 				}
-				m.state = stateWorking
-				m.output = ""
-				m.progressText = "Starting operation..."
-				return m, tea.Batch(m.spin.Tick, waitProgressCmd(m.progressCh), m.runActionCmd(m.currentSpec, m.inputs))
+				m.startWorking()
+				return m, tea.Batch(m.spin.Tick, waitProgressCmd(m.progressCh, m.progressDone), m.runActionCmd(m.currentSpec, m.inputs))
 			}
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
@@ -2468,10 +2759,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.drillInput.Blur()
 				m.lastActionLabel = "Failing App Drill-Down"
 				m.lastActionID = actNone
-				m.state = stateWorking
-				m.output = ""
-				m.progressText = "Starting operation..."
-				return m, tea.Batch(m.spin.Tick, waitProgressCmd(m.progressCh), func() tea.Msg {
+				m.startWorking()
+				return m, tea.Batch(m.spin.Tick, waitProgressCmd(m.progressCh, m.progressDone), func() tea.Msg {
 					out, err := m.client.reportAppFailureDetails(context.Background(), appName)
 					return resultMsg{text: out, err: err}
 				})
@@ -2508,10 +2797,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						return m, nil
 					}
-					m.state = stateWorking
-					m.output = ""
-					m.progressText = "Starting operation..."
-					return m, tea.Batch(m.spin.Tick, waitProgressCmd(m.progressCh), m.runActionCmd(spec, inputs))
+					m.startWorking()
+					return m, tea.Batch(m.spin.Tick, waitProgressCmd(m.progressCh, m.progressDone), m.runActionCmd(spec, inputs))
 				case confirmExport:
 					path := m.pendingExportPath
 					m.clearConfirm()
@@ -2592,17 +2879,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	case progressMsg:
-		if m.state == stateWorking {
+		if m.state == stateWorking && m.progressActive {
 			m.progressText = msg.text
-			return m, waitProgressCmd(m.progressCh)
+			return m, waitProgressCmd(m.progressCh, m.progressDone)
 		}
+	case progressStopMsg:
+		return m, nil
 	case resultMsg:
+		m.stopWorking()
 		if msg.err != nil {
 			m.setOutput("Error:\n" + msg.err.Error())
 		} else {
 			m.setOutput(msg.text)
 		}
-		m.progressText = ""
 		return m, nil
 	}
 	return m, nil
