@@ -93,7 +93,7 @@ func (e *graphRequestError) Error() string {
 
 var errNotFound = errors.New("not found")
 
-func authRecordFilePath() string {
+var authRecordFilePath = func() string {
 	exe, err := os.Executable()
 	if err != nil {
 		return "intune-management.auth.json"
@@ -101,7 +101,7 @@ func authRecordFilePath() string {
 	return filepath.Join(filepath.Dir(exe), "intune-management.auth.json")
 }
 
-func loadAuthRecord() (azidentity.AuthenticationRecord, bool) {
+func loadAuthRecord(cfg config.AuthConfig) (azidentity.AuthenticationRecord, bool) {
 	var record azidentity.AuthenticationRecord
 	b, err := os.ReadFile(authRecordFilePath())
 	if err != nil {
@@ -109,6 +109,15 @@ func loadAuthRecord() (azidentity.AuthenticationRecord, bool) {
 	}
 	if err := json.Unmarshal(b, &record); err != nil {
 		return record, false
+	}
+	// Discard cached record if it doesn't match the current config.
+	// Using a stale record from a different tenant or app registration
+	// would silently authenticate against the wrong environment.
+	if record.TenantID != "" && cfg.TenantID != "common" && !strings.EqualFold(record.TenantID, cfg.TenantID) {
+		return azidentity.AuthenticationRecord{}, false
+	}
+	if record.ClientID != "" && !strings.EqualFold(record.ClientID, cfg.ClientID) {
+		return azidentity.AuthenticationRecord{}, false
 	}
 	return record, true
 }
@@ -151,7 +160,7 @@ func NewClientWithConfig(cfg config.AuthConfig) (*Client, error) {
 		},
 	}
 
-	if record, ok := loadAuthRecord(); ok {
+	if record, ok := loadAuthRecord(cfg); ok {
 		opts.AuthenticationRecord = record
 	}
 
@@ -192,7 +201,9 @@ func (g *Client) getToken(ctx context.Context) (string, error) {
 			if authErr2 != nil {
 				return "", authErr2
 			}
-			_ = saveAuthRecord(record)
+			if saveErr := saveAuthRecord(record); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "⚠ Warning: could not persist auth record: %v\n", saveErr)
+			}
 			token, err = g.cred.GetToken(ctx, opts)
 			if err != nil {
 				return "", err

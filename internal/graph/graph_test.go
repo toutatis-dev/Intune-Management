@@ -18,9 +18,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"intune-management/internal/config"
 )
 
 func TestShouldRetryStatus(t *testing.T) {
@@ -170,6 +175,60 @@ func TestClassifyWindowsVersion(t *testing.T) {
 				t.Fatalf("classifyWindowsVersion(%q, %q) = %q, want %q", tt.operatingSystem, tt.osVersion, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoadAuthRecordRejectsStaleCache(t *testing.T) {
+	t.Parallel()
+
+	// Write a valid auth record to a temp file
+	dir := t.TempDir()
+	recordPath := filepath.Join(dir, "intune-management.auth.json")
+	record := azidentity.AuthenticationRecord{
+		Authority:     "https://login.microsoftonline.com",
+		ClientID:      "aaaa-bbbb-cccc",
+		HomeAccountID: "home-id",
+		TenantID:      "tenant-old",
+		Username:      "user@example.com",
+		Version:       "1.0",
+	}
+	b, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordPath, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Override auth record path for the test
+	origFunc := authRecordFilePath
+	authRecordFilePath = func() string { return recordPath }
+	t.Cleanup(func() { authRecordFilePath = origFunc })
+
+	// Matching config should load the record
+	cfg := config.AuthConfig{ClientID: "aaaa-bbbb-cccc", TenantID: "tenant-old"}
+	if _, ok := loadAuthRecord(cfg); !ok {
+		t.Fatal("expected auth record to load when config matches")
+	}
+
+	// Different tenant should reject the record
+	cfg.TenantID = "tenant-new"
+	if _, ok := loadAuthRecord(cfg); ok {
+		t.Fatal("expected auth record to be rejected when tenant differs")
+	}
+
+	// Different client should reject the record
+	cfg.TenantID = "tenant-old"
+	cfg.ClientID = "different-client"
+	if _, ok := loadAuthRecord(cfg); ok {
+		t.Fatal("expected auth record to be rejected when client ID differs")
+	}
+
+	// "common" tenant should accept any cached tenant
+	cfg.TenantID = "common"
+	cfg.ClientID = "aaaa-bbbb-cccc"
+	if _, ok := loadAuthRecord(cfg); !ok {
+		t.Fatal("expected auth record to load when config uses 'common' tenant")
 	}
 }
 
