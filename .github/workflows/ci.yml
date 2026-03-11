@@ -13,10 +13,28 @@ on:
       - master
 
 jobs:
-  build-and-test:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+  build:
+    name: Build (${{ matrix.goos }}-${{ matrix.goarch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            output: intune-management-linux-amd64
+          - os: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            output: intune-management-windows-amd64.exe
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            output: intune-management-darwin-amd64
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            output: intune-management-darwin-arm64
 
     steps:
       - name: Checkout Code
@@ -28,57 +46,47 @@ jobs:
           go-version: '1.21.x'
           cache: true
 
-      - name: Verify Formatting
+      - name: Verify Formatting (Linux only)
+        if: matrix.os == 'ubuntu-latest' && matrix.goos == 'linux'
         run: |
           if [ -n "$(go fmt ./...)" ]; then
             echo "Code is not formatted. Please run 'go fmt ./...'."
             exit 1
           fi
 
-      - name: Run Tests
+      - name: Run Tests (Linux only)
+        if: matrix.os == 'ubuntu-latest' && matrix.goos == 'linux'
         run: go test -v ./...
 
-      - name: Build Windows
+      - name: Build Binary
         env:
-          GOOS: windows
-          GOARCH: amd64
-        run: go build -o intune-management-windows-amd64.exe ./cmd/intune-management
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.os == 'macos-latest' && '1' || '0' }}
+        run: go build -o ${{ matrix.output }} ./cmd/intune-management
 
-      - name: Build Linux (amd64)
-        env:
-          GOOS: linux
-          GOARCH: amd64
-        run: go build -o intune-management-linux-amd64 ./cmd/intune-management
-
-      - name: Build macOS (Intel)
-        env:
-          GOOS: darwin
-          GOARCH: amd64
-        run: go build -o intune-management-darwin-amd64 ./cmd/intune-management
-
-      - name: Build macOS (Apple Silicon)
-        env:
-          GOOS: darwin
-          GOARCH: arm64
-        run: go build -o intune-management-darwin-arm64 ./cmd/intune-management
-
-      - name: Upload Artifacts
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: intune-management-binaries
-          path: |
-            intune-management-windows-amd64.exe
-            intune-management-linux-amd64
-            intune-management-darwin-amd64
-            intune-management-darwin-arm64
+          name: ${{ matrix.output }}
+          path: ${{ matrix.output }}
           retention-days: 7
+
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bin
+          merge-multiple: true
 
       - name: Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: |
-            intune-management-windows-amd64.exe
-            intune-management-linux-amd64
-            intune-management-darwin-amd64
-            intune-management-darwin-arm64
+          files: bin/*
