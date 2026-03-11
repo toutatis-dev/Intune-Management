@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(go test:*)",
+      "Bash(/c/AppDev/intune-management-test.exe:*)",
+      "Bash(GOTMPDIR=\"C:/AppDev\" go test:*)"
+    ]
+  }
+}
