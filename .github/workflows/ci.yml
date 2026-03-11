@@ -5,6 +5,8 @@ on:
     branches:
       - main
       - master
+    tags:
+      - 'v*'
   pull_request:
     branches:
       - main
@@ -13,6 +15,8 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Code
@@ -68,3 +72,13 @@ jobs:
             intune-management-darwin-amd64
             intune-management-darwin-arm64
           retention-days: 7
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            intune-management-windows-amd64.exe
+            intune-management-linux-amd64
+            intune-management-darwin-amd64
+            intune-management-darwin-arm64
