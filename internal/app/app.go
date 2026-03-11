@@ -1,3 +1,17 @@
+// Copyright (C) 2026 Jack Miller
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package app
 
 import (
@@ -821,7 +835,7 @@ func (m *model) startConfirmExport(path string, cancelState menuState) {
 	}
 	m.confirmBody = mode + "\n\nPath: " + path
 	if _, err := os.Stat(path); err == nil {
-		m.confirmBody += "\n\n⚠ File already exists and will be overwritten."
+		m.confirmBody += "\n\nâš  File already exists and will be overwritten."
 	}
 	m.confirmCancelState = cancelState
 	m.pendingExportPath = path
@@ -1539,7 +1553,7 @@ func (m model) dryRunBanner() string {
 	if !m.dryRun {
 		return ""
 	}
-	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("208")).Padding(0, 1).Render("⚠ DRY-RUN MODE") + "\n\n"
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("208")).Padding(0, 1).Render("âš  DRY-RUN MODE") + "\n\n"
 }
 
 func (m model) View() string {
