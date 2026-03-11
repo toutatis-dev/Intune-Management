@@ -15,6 +15,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity/cache"
 	"github.com/atotto/clipboard"
 
 	"intune-management/internal/config"
@@ -81,9 +82,15 @@ func NewClient() (*Client, error) {
 }
 
 func NewClientWithConfig(cfg config.AuthConfig) (*Client, error) {
+	var tokenCache azidentity.Cache
+	if c, err := cache.New(&cache.Options{Name: "intune-management"}); err == nil {
+		tokenCache = c
+	}
+
 	cred, err := azidentity.NewDeviceCodeCredential(&azidentity.DeviceCodeCredentialOptions{
 		ClientID: cfg.ClientID,
 		TenantID: cfg.TenantID,
+		Cache:    tokenCache,
 		UserPrompt: func(ctx context.Context, message azidentity.DeviceCodeMessage) error {
 			fmt.Printf("\n%s\n\n", message.Message)
 			if strings.TrimSpace(message.UserCode) != "" {
