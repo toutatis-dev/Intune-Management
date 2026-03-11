@@ -835,7 +835,7 @@ func (m *model) startConfirmExport(path string, cancelState menuState) {
 	}
 	m.confirmBody = mode + "\n\nPath: " + path
 	if _, err := os.Stat(path); err == nil {
-		m.confirmBody += "\n\nâš  File already exists and will be overwritten."
+		m.confirmBody += "\n\n⚠ File already exists and will be overwritten."
 	}
 	m.confirmCancelState = cancelState
 	m.pendingExportPath = path
@@ -1553,7 +1553,7 @@ func (m model) dryRunBanner() string {
 	if !m.dryRun {
 		return ""
 	}
-	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("208")).Padding(0, 1).Render("âš  DRY-RUN MODE") + "\n\n"
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("208")).Padding(0, 1).Render("⚠ DRY-RUN MODE") + "\n\n"
 }
 
 func (m model) View() string {
