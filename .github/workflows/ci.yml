@@ -61,8 +61,18 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          # CGO is generally only needed for macOS builds interacting with system APIs
           CGO_ENABLED: ${{ matrix.os == 'macos-latest' && '1' || '0' }}
-        run: go build -o ${{ matrix.output }} ./cmd/intune-management
+        shell: bash
+        run: |
+          # -s -w strips debug info to shrink the binary
+          # The version is dynamically pulled from the Git tag if it exists
+          VERSION=${GITHUB_REF#refs/tags/}
+          # If not triggered by a tag, use the short SHA
+          if [[ $VERSION == refs/heads/* ]]; then
+            VERSION=$(git rev-parse --short HEAD)
+          fi
+          go build -ldflags="-s -w -X 'main.Version=${VERSION}'" -o ${{ matrix.output }} ./cmd/intune-management
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -79,13 +89,24 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: bin
           merge-multiple: true
 
-      - name: Release
+      - name: Prepare Release Assets
+        run: |
+          # Ensure the GPLv3 License is included with the binaries
+          cp LICENSE bin/
+          cp README.md bin/ 2>/dev/null || :
+
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: bin/*
+          # This generates the release notes automatically based on commit history
+          generate_release_notes: true

@@ -21,8 +21,11 @@ import (
 	"intune-management/internal/app"
 )
 
+// Version is set during build via ldflags
+var Version = "dev"
+
 func main() {
-	if err := app.Run(); err != nil {
+	if err := app.Run(Version); err != nil {
 		fmt.Println("Program error:", err)
 		os.Exit(1)
 	}

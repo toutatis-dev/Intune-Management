@@ -195,7 +195,7 @@ func TestParentMenuState(t *testing.T) {
 func TestNumberHotkeys(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(nil)
+	m := newModel(nil, "test")
 	m.state = stateUsersGroups
 	m.width = 120
 	m.height = 40
@@ -210,7 +210,7 @@ func TestNumberHotkeys(t *testing.T) {
 		t.Fatal("expected number hotkey to change cursor or state")
 	}
 
-	m3 := newModel(nil)
+	m3 := newModel(nil, "test")
 	m3.state = stateUsersGroups
 	m3.width = 120
 	m3.height = 40
@@ -224,7 +224,7 @@ func TestNumberHotkeys(t *testing.T) {
 func TestInputBackNavigation(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(nil)
+	m := newModel(nil, "test")
 	m.state = stateInput
 	m.lastMenuState = stateUsersGroups
 	m.currentSpec = specForAction(actAddUsersCSV)
@@ -254,7 +254,7 @@ func TestInputBackNavigation(t *testing.T) {
 func TestVisibleMenuFiltering(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(nil)
+	m := newModel(nil, "test")
 	m.state = stateUsersGroups
 
 	m.filterQuery = ""
@@ -312,7 +312,7 @@ func TestResultSummaryViewIncludesStickyContext(t *testing.T) {
 func TestJumpToNextMatchWraps(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(nil)
+	m := newModel(nil, "test")
 	m.output = "alpha\nbeta\ngamma\ndelta\nbeta again"
 	m.searchQuery = "beta"
 	m.searchMatchLine = -1
@@ -344,7 +344,7 @@ func TestJumpToNextMatchWraps(t *testing.T) {
 func TestExportDirectoryValidation(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(nil)
+	m := newModel(nil, "test")
 	m.state = stateExportPrompt
 	m.lastHeaders = []string{"A"}
 	m.lastRows = [][]string{{"1"}}

@@ -265,6 +265,7 @@ type model struct {
 	lastHeaders     []string
 	lastRows        [][]string
 	lastActionLabel string
+	version         string
 
 	confirmKind        confirmKind
 	confirmTitle       string
@@ -317,7 +318,7 @@ func newUIStyles() uiStyles {
 	}
 }
 
-func newModel(client *graph.Client) model {
+func newModel(client *graph.Client, version string) model {
 	ti := textinput.New()
 	ti.CharLimit = 512
 	ti.Width = 72
@@ -345,6 +346,7 @@ func newModel(client *graph.Client) model {
 		client:        client,
 		state:         stateMain,
 		lastMenuState: stateMain,
+		version:       version,
 		mainMenu: []menuItem{
 			{label: "Manage Users and Groups", description: "List users, search groups, and bulk add members from CSV", next: stateUsersGroups},
 			{label: "Manage Devices and Groups", description: "List devices, create groups, and manage app assignments", next: stateDevicesApps},
@@ -1556,8 +1558,17 @@ func (m model) dryRunBanner() string {
 	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("208")).Padding(0, 1).Render("⚠ DRY-RUN MODE") + "\n\n"
 }
 
+func (m model) headerPanel() string {
+	title := " Intune Management Tool "
+	if m.version != "" {
+		title += m.version + " "
+	}
+	return m.styles.header.Render(title)
+}
+
 func (m model) View() string {
 	banner := m.dryRunBanner()
+	header := m.headerPanel()
 	switch m.state {
 	case stateDrillPrompt:
 		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
@@ -1565,35 +1576,35 @@ func (m model) View() string {
 			m.drillInput.View(),
 			m.styles.hint.Render("Enter rank or exact app name   Esc: cancel"),
 		))
-		return m.styles.app.Render(banner + m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
+		return m.styles.app.Render(banner + header + "\n\n" + body)
 	case stateHelp:
 		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
 			m.styles.subHeader.Render("Keyboard Help"),
 			helpTextForState(m.helpReturnState),
 			m.styles.hint.Render("Enter/Esc/?: close help"),
 		))
-		return m.styles.app.Render(banner + m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
+		return m.styles.app.Render(banner + header + "\n\n" + body)
 	case stateConfirm:
 		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
 			m.styles.subHeader.Render(m.confirmTitle),
 			m.confirmBody,
 			m.styles.hint.Render("y/Enter: confirm   n/Esc: cancel"),
 		))
-		return m.styles.app.Render(banner + m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
+		return m.styles.app.Render(banner + header + "\n\n" + body)
 	case stateMenuFilter:
 		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
 			m.styles.subHeader.Render("Filter Menu Options"),
 			m.filterInput.View(),
 			m.styles.hint.Render("Enter: apply filter   Esc: cancel"),
 		))
-		return m.styles.app.Render(banner + m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
+		return m.styles.app.Render(banner + header + "\n\n" + body)
 	case stateExportPrompt:
 		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
 			m.styles.subHeader.Render("Export Current Table to CSV"),
 			m.exportInput.View(),
 			m.styles.hint.Render("Enter: export   Esc: cancel"),
 		))
-		return m.styles.app.Render(banner + m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
+		return m.styles.app.Render(banner + header + "\n\n" + body)
 	case stateInput:
 		step := len(m.inputs) + 1
 		total := len(m.currentSpec.prompts)
@@ -1607,20 +1618,20 @@ func (m model) View() string {
 			m.input.View(),
 			m.styles.hint.Render("Enter: continue   "+escHint),
 		))
-		return m.styles.app.Render(banner + m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
+		return m.styles.app.Render(banner + header + "\n\n" + body)
 	case statePreview:
 		prefix := m.styles.subHeader.Render("Preview Before Write")
 		content := m.output
 		if m.vpReady {
 			content = m.viewport.View()
 		}
-		headerPanel := m.resultSummaryView()
+		headerSummary := m.resultSummaryView()
 		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
 			prefix,
 			content,
 			m.styles.hint.Render("Up/Down PgUp/PgDn Home/End: scroll   Enter: continue   Esc: cancel"),
 		))
-		return m.styles.app.Render(banner + m.styles.header.Render(" Intune Management Tool ") + "\n\n" + headerPanel + "\n\n" + body)
+		return m.styles.app.Render(banner + header + "\n\n" + headerSummary + "\n\n" + body)
 	case stateWorking:
 		progress := m.progressText
 		if strings.TrimSpace(progress) == "" {
@@ -1631,7 +1642,7 @@ func (m model) View() string {
 			m.styles.hint.Render(progress),
 			m.styles.hint.Render("Esc: cancel"),
 		))
-		return m.styles.app.Render(banner + m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
+		return m.styles.app.Render(banner + header + "\n\n" + body)
 	case stateOutput:
 		prefix := m.styles.ok.Render("Result")
 		if strings.HasPrefix(m.output, "Error:") {
@@ -1651,13 +1662,13 @@ func (m model) View() string {
 		if m.searchQuery != "" {
 			exportHint = fmt.Sprintf("/%s (n/N: next/prev)   ", m.searchQuery) + exportHint
 		}
-		headerPanel := m.resultSummaryView()
+		headerSummary := m.resultSummaryView()
 		body := m.styles.panel.Render(fmt.Sprintf("%s\n\n%s\n\n%s",
 			prefix,
 			content,
 			m.styles.hint.Render(exportHint),
 		))
-		return m.styles.app.Render(banner + m.styles.header.Render(" Intune Management Tool ") + "\n\n" + headerPanel + "\n\n" + body)
+		return m.styles.app.Render(banner + header + "\n\n" + headerSummary + "\n\n" + body)
 	case stateOutputSearch:
 		content := m.output
 		if m.vpReady {
@@ -1668,7 +1679,7 @@ func (m model) View() string {
 			content,
 			m.searchInput.View(),
 		))
-		return m.styles.app.Render(banner + m.styles.header.Render(" Intune Management Tool ") + "\n\n" + body)
+		return m.styles.app.Render(banner + header + "\n\n" + body)
 	default:
 		title := "Main Menu"
 		sub := "Pick an operation area"
@@ -1696,7 +1707,7 @@ func (m model) View() string {
 		if m.filterQuery != "" {
 			filterLine = "\n" + m.styles.hint.Render("Active filter: "+m.filterQuery+" (press / to edit)")
 		}
-		screen := banner + m.styles.header.Render(" Intune Management Tool ") + "\n\n" +
+		screen := banner + header + "\n\n" +
 			m.styles.subHeader.Render(title) + "\n" +
 			m.styles.hint.Render(sub) + "\n\n" +
 			m.styles.panel.Render(menuView) + filterLine + "\n\n" +
@@ -1741,12 +1752,12 @@ func (m model) renderMenu() string {
 }
 
 // Run starts the TUI application.
-func Run() error {
+func Run(version string) error {
 	client, err := graph.NewClient()
 	if err != nil {
 		return err
 	}
-	p := tea.NewProgram(newModel(client))
+	p := tea.NewProgram(newModel(client, version))
 	if _, err := p.Run(); err != nil {
 		return err
 	}
