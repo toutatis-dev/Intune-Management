@@ -1,2 +1,7 @@
 intune-management
+intune-management.exe
+intune-management-windows-amd64.exe
+intune-management-linux-amd64
+intune-management-darwin-amd64
+intune-management-darwin-arm64
 .claude/

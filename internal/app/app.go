@@ -1107,10 +1107,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, tea.Quit
 				}
 			case "esc":
-				if m.state == stateMain {
-					return m, tea.Quit
+				if m.state != stateMain {
+					m.resetMenuPosition(parentMenuState(m.state))
 				}
-				m.resetMenuPosition(parentMenuState(m.state))
 			case "/":
 				m.lastMenuState = m.state
 				m.filterInput.SetValue(m.filterQuery)
