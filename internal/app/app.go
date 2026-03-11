@@ -236,20 +236,20 @@ type model struct {
 	repInspectMenu []menuItem
 	cfgMenu        []menuItem
 
-	spin        spinner.Model
-	viewport    viewport.Model
-	vpReady     bool
-	styles      uiStyles
-	input       textinput.Model
-	filterInput textinput.Model
-	exportInput textinput.Model
-	drillInput  textinput.Model
-	filterQuery string
-	currentSpec actionSpec
-	inputs      []string
-	output      string
-	lastHeaders []string
-	lastRows    [][]string
+	spin            spinner.Model
+	viewport        viewport.Model
+	vpReady         bool
+	styles          uiStyles
+	input           textinput.Model
+	filterInput     textinput.Model
+	exportInput     textinput.Model
+	drillInput      textinput.Model
+	filterQuery     string
+	currentSpec     actionSpec
+	inputs          []string
+	output          string
+	lastHeaders     []string
+	lastRows        [][]string
 	lastActionLabel string
 
 	confirmKind        confirmKind
