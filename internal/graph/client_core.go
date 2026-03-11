@@ -202,8 +202,8 @@ func (g *Client) getToken(ctx context.Context) (string, error) {
 				return "", authErr2
 			}
 			if saveErr := saveAuthRecord(record); saveErr != nil {
-			fmt.Fprintf(os.Stderr, "⚠ Warning: could not persist auth record: %v\n", saveErr)
-		}
+				fmt.Fprintf(os.Stderr, "⚠ Warning: could not persist auth record: %v\n", saveErr)
+			}
 			token, err = g.cred.GetToken(ctx, opts)
 			if err != nil {
 				return "", err
