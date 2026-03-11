@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -77,6 +79,34 @@ func (e *graphRequestError) Error() string {
 
 var errNotFound = errors.New("not found")
 
+func authRecordFilePath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "intune-management.auth.json"
+	}
+	return filepath.Join(filepath.Dir(exe), "intune-management.auth.json")
+}
+
+func loadAuthRecord() (azidentity.AuthenticationRecord, bool) {
+	var record azidentity.AuthenticationRecord
+	b, err := os.ReadFile(authRecordFilePath())
+	if err != nil {
+		return record, false
+	}
+	if err := json.Unmarshal(b, &record); err != nil {
+		return record, false
+	}
+	return record, true
+}
+
+func saveAuthRecord(record azidentity.AuthenticationRecord) error {
+	b, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(authRecordFilePath(), b, 0600)
+}
+
 func NewClient() (*Client, error) {
 	return NewClientWithConfig(config.Resolve())
 }
@@ -87,10 +117,11 @@ func NewClientWithConfig(cfg config.AuthConfig) (*Client, error) {
 		tokenCache = c
 	}
 
-	cred, err := azidentity.NewDeviceCodeCredential(&azidentity.DeviceCodeCredentialOptions{
-		ClientID: cfg.ClientID,
-		TenantID: cfg.TenantID,
-		Cache:    tokenCache,
+	opts := &azidentity.DeviceCodeCredentialOptions{
+		ClientID:                       cfg.ClientID,
+		TenantID:                       cfg.TenantID,
+		Cache:                          tokenCache,
+		DisableAutomaticAuthentication: true,
 		UserPrompt: func(ctx context.Context, message azidentity.DeviceCodeMessage) error {
 			fmt.Printf("\n%s\n\n", message.Message)
 			if strings.TrimSpace(message.UserCode) != "" {
@@ -104,7 +135,13 @@ func NewClientWithConfig(cfg config.AuthConfig) (*Client, error) {
 			fmt.Println()
 			return nil
 		},
-	})
+	}
+
+	if record, ok := loadAuthRecord(); ok {
+		opts.AuthenticationRecord = record
+	}
+
+	cred, err := azidentity.NewDeviceCodeCredential(opts)
 	if err != nil {
 		return nil, err
 	}
@@ -131,6 +168,28 @@ func (g *Client) emitProgress(text string) {
 	}
 }
 
+func (g *Client) getToken(ctx context.Context) (string, error) {
+	opts := policy.TokenRequestOptions{Scopes: g.scope}
+	token, err := g.cred.GetToken(ctx, opts)
+	if err != nil {
+		var authErr *azidentity.AuthenticationRequiredError
+		if errors.As(err, &authErr) || strings.Contains(err.Error(), "AuthenticationRequiredError") || strings.Contains(err.Error(), "interaction is required") {
+			record, authErr2 := g.cred.Authenticate(ctx, &opts)
+			if authErr2 != nil {
+				return "", authErr2
+			}
+			_ = saveAuthRecord(record)
+			token, err = g.cred.GetToken(ctx, opts)
+			if err != nil {
+				return "", err
+			}
+			return token.Token, nil
+		}
+		return "", err
+	}
+	return token.Token, nil
+}
+
 func (g *Client) do(ctx context.Context, method, fullURL string, body any) ([]byte, error) {
 	var payload []byte
 	if body != nil {
@@ -144,7 +203,7 @@ func (g *Client) do(ctx context.Context, method, fullURL string, body any) ([]by
 	const maxRetries = 4
 	hadAuthRetry := false
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		token, err := g.cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: g.scope})
+		token, err := g.getToken(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -157,7 +216,7 @@ func (g *Client) do(ctx context.Context, method, fullURL string, body any) ([]by
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Authorization", "Bearer "+token.Token)
+		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Accept", "application/json")
 		if len(payload) > 0 {
 			req.Header.Set("Content-Type", "application/json")
@@ -350,11 +409,11 @@ func NewStubClient(cfg config.AuthConfig) *Client {
 }
 
 func (g *Client) AuthHealth(ctx context.Context) (string, error) {
-	token, err := g.cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: g.scope})
+	token, err := g.getToken(ctx)
 	if err != nil {
 		return "", err
 	}
-	claims, err := decodeJWTClaims(token.Token)
+	claims, err := decodeJWTClaims(token)
 	if err != nil {
 		return "", err
 	}
