@@ -265,6 +265,7 @@ type model struct {
 	lastHeaders     []string
 	lastRows        [][]string
 	lastActionLabel string
+	version         string
 
 	confirmKind        confirmKind
 	confirmTitle       string
@@ -317,7 +318,7 @@ func newUIStyles() uiStyles {
 	}
 }
 
-func newModel(client *graph.Client) model {
+func newModel(client *graph.Client, version string) model {
 	ti := textinput.New()
 	ti.CharLimit = 512
 	ti.Width = 72
@@ -345,6 +346,7 @@ func newModel(client *graph.Client) model {
 		client:        client,
 		state:         stateMain,
 		lastMenuState: stateMain,
+		version:       version,
 		mainMenu: []menuItem{
 			{label: "Manage Users and Groups", description: "List users, search groups, and bulk add members from CSV", next: stateUsersGroups},
 			{label: "Manage Devices and Groups", description: "List devices, create groups, and manage app assignments", next: stateDevicesApps},
@@ -1556,6 +1558,14 @@ func (m model) dryRunBanner() string {
 	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("208")).Padding(0, 1).Render("⚠ DRY-RUN MODE") + "\n\n"
 }
 
+func (m model) headerPanel() string {
+	title := " Intune Management Tool "
+	if m.version != "" {
+		title += m.version + " "
+	}
+	return m.styles.header.Render(title)
+}
+
 func (m model) View() string {
 	banner := m.dryRunBanner()
 	switch m.state {
@@ -1741,12 +1751,12 @@ func (m model) renderMenu() string {
 }
 
 // Run starts the TUI application.
-func Run() error {
+func Run(version string) error {
 	client, err := graph.NewClient()
 	if err != nil {
 		return err
 	}
-	p := tea.NewProgram(newModel(client))
+	p := tea.NewProgram(newModel(client, version))
 	if _, err := p.Run(); err != nil {
 		return err
 	}
