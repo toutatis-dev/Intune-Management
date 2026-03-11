@@ -29,14 +29,19 @@ A fast, interactive Terminal User Interface (TUI) application written in Go for 
 
 ## Installation
 
-### Prerequisites
-* [Go 1.21+](https://golang.org/doc/install)
+### Download Pre-compiled Binary (Recommended)
+The latest stable releases for Windows, Linux, and macOS are available in the [Releases](../../releases) section of this repository.
+
+1. Go to the [Releases](../../releases) page.
+2. Download the executable for your operating system.
+3. Extract (if necessary) and run the executable directly.
 
 ### Building from Source
+If you prefer to build from source, ensure you have [Go 1.21+](https://golang.org/doc/install) installed.
 
 1. Clone the repository:
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/toutatis-dev/Intune-Management.git
    cd intune-management
    ```
 2. Build the application:
