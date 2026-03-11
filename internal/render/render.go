@@ -140,12 +140,16 @@ func splitTableLine(line string) []string {
 	return out
 }
 
-func ExportCSV(path string, headers []string, rows [][]string) error {
+func ExportCSV(path string, headers []string, rows [][]string) (retErr error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil && retErr == nil {
+			retErr = closeErr
+		}
+	}()
 
 	w := csv.NewWriter(f)
 	if err := w.Write(headers); err != nil {

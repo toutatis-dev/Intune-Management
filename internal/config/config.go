@@ -16,8 +16,10 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 )
 
 const DefaultClientID = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
@@ -25,6 +27,26 @@ const DefaultClientID = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
 type AuthConfig struct {
 	ClientID string
 	TenantID string
+}
+
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// Validate checks that ClientID and TenantID are well-formed.
+// ClientID must be a UUID. TenantID must be a UUID or one of the
+// well-known Azure AD aliases ("common", "organizations", "consumers").
+func (c AuthConfig) Validate() error {
+	if !uuidPattern.MatchString(c.ClientID) {
+		return fmt.Errorf("invalid client ID %q: must be a UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)", c.ClientID)
+	}
+	switch c.TenantID {
+	case "common", "organizations", "consumers":
+		return nil
+	default:
+		if !uuidPattern.MatchString(c.TenantID) {
+			return fmt.Errorf("invalid tenant ID %q: must be a UUID or one of \"common\", \"organizations\", \"consumers\"", c.TenantID)
+		}
+	}
+	return nil
 }
 
 func FilePath() string {
