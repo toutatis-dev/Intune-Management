@@ -1,0 +1,376 @@
+package graph
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/atotto/clipboard"
+
+	"intune-management/internal/config"
+	"intune-management/internal/render"
+)
+
+var requiredScopes = []string{
+	"https://graph.microsoft.com/User.Read.All",
+	"https://graph.microsoft.com/Group.ReadWrite.All",
+	"https://graph.microsoft.com/Device.Read.All",
+	"https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All",
+	"https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All",
+}
+
+const graphBase = "https://graph.microsoft.com/v1.0"
+
+type Client struct {
+	cred         *azidentity.DeviceCodeCredential
+	http         *http.Client
+	scope        []string
+	cfg          config.AuthConfig
+	progressHook func(string)
+}
+
+type pageResponse struct {
+	Value    []map[string]any `json:"value"`
+	NextLink string           `json:"@odata.nextLink"`
+}
+
+type graphErrorEnvelope struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+type graphRequestError struct {
+	Method     string
+	URL        string
+	Status     string
+	StatusCode int
+	Code       string
+	Message    string
+	Raw        string
+}
+
+func (e *graphRequestError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Code != "" {
+		return fmt.Sprintf("graph %s %s failed: %s | %s: %s", e.Method, e.URL, e.Status, e.Code, e.Message)
+	}
+	if e.Raw == "" {
+		return fmt.Sprintf("graph %s %s failed: %s", e.Method, e.URL, e.Status)
+	}
+	return fmt.Sprintf("graph %s %s failed: %s | %s", e.Method, e.URL, e.Status, e.Raw)
+}
+
+var errNotFound = errors.New("not found")
+
+func NewClient() (*Client, error) {
+	return NewClientWithConfig(config.Resolve())
+}
+
+func NewClientWithConfig(cfg config.AuthConfig) (*Client, error) {
+	cred, err := azidentity.NewDeviceCodeCredential(&azidentity.DeviceCodeCredentialOptions{
+		ClientID: cfg.ClientID,
+		TenantID: cfg.TenantID,
+		UserPrompt: func(ctx context.Context, message azidentity.DeviceCodeMessage) error {
+			fmt.Printf("\n%s\n\n", message.Message)
+			if strings.TrimSpace(message.UserCode) != "" {
+				fmt.Printf("Device code: %s\n", message.UserCode)
+				if err := clipboard.WriteAll(message.UserCode); err == nil {
+					fmt.Println("Copied device code to clipboard.")
+				} else {
+					fmt.Println("Could not copy device code to clipboard; copy it manually from above.")
+				}
+			}
+			fmt.Println()
+			return nil
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &Client{
+		cred:  cred,
+		http:  &http.Client{Timeout: 60 * time.Second},
+		scope: requiredScopes,
+		cfg:   cfg,
+	}, nil
+}
+
+func (g *Client) Config() config.AuthConfig {
+	return g.cfg
+}
+
+func (g *Client) SetProgressHook(hook func(string)) {
+	g.progressHook = hook
+}
+
+func (g *Client) emitProgress(text string) {
+	if g.progressHook != nil {
+		g.progressHook(text)
+	}
+}
+
+func (g *Client) do(ctx context.Context, method, fullURL string, body any) ([]byte, error) {
+	var payload []byte
+	if body != nil {
+		var err error
+		payload, err = json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	const maxRetries = 4
+	hadAuthRetry := false
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		token, err := g.cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: g.scope})
+		if err != nil {
+			return nil, err
+		}
+
+		var reader io.Reader
+		if len(payload) > 0 {
+			reader = bytes.NewReader(payload)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, fullURL, reader)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token.Token)
+		req.Header.Set("Accept", "application/json")
+		if len(payload) > 0 {
+			req.Header.Set("Content-Type", "application/json")
+		}
+
+		resp, err := g.http.Do(req)
+		if err != nil {
+			if attempt == maxRetries {
+				return nil, err
+			}
+			wait := retryDelay(attempt, "")
+			g.emitProgress(fmt.Sprintf("Transient network error; retrying in %s (%d/%d)", wait, attempt+1, maxRetries))
+			time.Sleep(wait)
+			continue
+		}
+
+		raw, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if resp.StatusCode < 400 {
+			return raw, nil
+		}
+		if resp.StatusCode == http.StatusUnauthorized && !hadAuthRetry {
+			hadAuthRetry = true
+			g.emitProgress("Token expired; refreshing credentials...")
+			continue
+		}
+		if shouldRetryStatus(resp.StatusCode) && attempt < maxRetries {
+			wait := retryDelay(attempt, resp.Header.Get("Retry-After"))
+			g.emitProgress(fmt.Sprintf("Graph %d received; retrying in %s (%d/%d)", resp.StatusCode, wait, attempt+1, maxRetries))
+			time.Sleep(wait)
+			continue
+		}
+		return nil, formatGraphError(method, fullURL, resp.Status, raw)
+	}
+
+	return nil, errors.New("graph request failed after retries")
+}
+
+func formatGraphError(method, fullURL, status string, raw []byte) error {
+	statusCode := 0
+	if parts := strings.Fields(status); len(parts) > 0 {
+		statusCode, _ = strconv.Atoi(parts[0])
+	}
+	var env graphErrorEnvelope
+	if err := json.Unmarshal(raw, &env); err == nil && env.Error.Code != "" {
+		return &graphRequestError{
+			Method:     method,
+			URL:        fullURL,
+			Status:     status,
+			StatusCode: statusCode,
+			Code:       env.Error.Code,
+			Message:    env.Error.Message,
+		}
+	}
+	msg := strings.TrimSpace(string(raw))
+	if len(msg) > 500 {
+		msg = msg[:500] + "..."
+	}
+	return &graphRequestError{
+		Method:     method,
+		URL:        fullURL,
+		Status:     status,
+		StatusCode: statusCode,
+		Raw:        msg,
+	}
+}
+
+func isGraphNotFound(err error) bool {
+	var reqErr *graphRequestError
+	if !errors.As(err, &reqErr) {
+		return false
+	}
+	if reqErr.StatusCode == http.StatusNotFound {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(reqErr.Code)) {
+	case "itemnotfound", "request_resourcenotfound", "resourcenotfound", "directoryobjectnotfound":
+		return true
+	case "request_badrequest":
+		return strings.Contains(strings.ToLower(reqErr.Message), "invalid object identifier")
+	default:
+		return false
+	}
+}
+
+func isGraphForbidden(err error) bool {
+	var reqErr *graphRequestError
+	if !errors.As(err, &reqErr) {
+		return false
+	}
+	if reqErr.StatusCode == http.StatusForbidden {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(reqErr.Code)) {
+	case "authorization_requestdenied", "forbidden":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldRetryStatus(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func retryDelay(attempt int, retryAfter string) time.Duration {
+	if retryAfter != "" {
+		if secs, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	base := 500 * time.Millisecond
+	d := base * time.Duration(1<<attempt)
+	if d > 8*time.Second {
+		d = 8 * time.Second
+	}
+	return d
+}
+
+func decodeJWTClaims(token string) (map[string]any, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return nil, errors.New("invalid JWT format")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, err
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, err
+	}
+	return claims, nil
+}
+
+func escapeOData(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}
+
+func asString(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return t
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (g *Client) list(ctx context.Context, path string) ([]map[string]any, error) {
+	next := graphBase + path
+	all := make([]map[string]any, 0)
+	for next != "" {
+		b, err := g.do(ctx, http.MethodGet, next, nil)
+		if err != nil {
+			return nil, err
+		}
+		var page pageResponse
+		if err := json.Unmarshal(b, &page); err != nil {
+			return nil, err
+		}
+		all = append(all, page.Value...)
+		g.emitProgress(fmt.Sprintf("Fetched %d items from %s", len(all), path))
+		next = page.NextLink
+	}
+	return all, nil
+}
+
+// NewStubClient creates a Client with the given config but no credentials.
+// Useful for testing UI components that don't make API calls.
+func NewStubClient(cfg config.AuthConfig) *Client {
+	return &Client{cfg: cfg}
+}
+
+func (g *Client) AuthHealth(ctx context.Context) (string, error) {
+	token, err := g.cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: g.scope})
+	if err != nil {
+		return "", err
+	}
+	claims, err := decodeJWTClaims(token.Token)
+	if err != nil {
+		return "", err
+	}
+	exp := asString(claims["exp"])
+	if exp != "" {
+		if unix, convErr := strconv.ParseInt(exp, 10, 64); convErr == nil {
+			exp = time.Unix(unix, 0).UTC().Format(time.RFC3339)
+		}
+	}
+	effectiveClient := asString(claims["appid"])
+	if effectiveClient == "" {
+		effectiveClient = asString(claims["azp"])
+	}
+	effectiveTenant := asString(claims["tid"])
+	tokenScopes := asString(claims["scp"])
+
+	return render.RenderInspector("Auth Health", [][2]string{
+		{"Configured Client ID", g.cfg.ClientID},
+		{"Configured Tenant ID", g.cfg.TenantID},
+		{"Token Client ID", effectiveClient},
+		{"Token Tenant ID", effectiveTenant},
+		{"Token Expires (UTC)", exp},
+		{"Token Scopes", tokenScopes},
+		{"Requested Scopes", strings.Join(g.scope, ", ")},
+	}), nil
+}
