@@ -60,6 +60,24 @@ Start the tool by running the compiled executable:
 ### Authentication
 The tool uses Microsoft Graph's **Device Code Flow**. When an API call is made, the tool will present a device code. Visit [microsoft.com/devicelogin](https://microsoft.com/devicelogin), enter the code, and sign in with an account that has appropriate Intune/Azure AD permissions.
 
+#### Custom App Registration (Recommended)
+By default, the tool uses the well-known Microsoft Graph PowerShell Client ID. While this works out-of-the-box for many tenants, it is highly recommended to create your own Azure AD (Entra ID) App Registration to adhere to security best practices and avoid potential conditional access blocks.
+
+1. Go to the **Azure Portal** > **App registrations** > **New registration**.
+2. Name the application (e.g., "Intune Management TUI").
+3. Under **Supported account types**, select **Accounts in this organizational directory only**.
+4. Click **Register**.
+5. In the left menu, go to **Authentication**. Under **Advanced settings**, set **Allow public client flows** to **Yes** and save.
+6. Go to **API permissions** and add the following **Delegated** Microsoft Graph permissions:
+   - `User.Read.All`
+   - `Group.ReadWrite.All`
+   - `Device.Read.All`
+   - `DeviceManagementApps.ReadWrite.All`
+   - `DeviceManagementManagedDevices.Read.All`
+7. Click **Grant admin consent** for your tenant.
+
+Once created, launch the tool, navigate to **Settings**, and update the **Graph Client ID** and **Graph Tenant ID** with the values from your new App Registration.
+
 ### CSV Formats
 
 When running bulk operations, ensure your CSV files contain the required headers:
