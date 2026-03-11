@@ -1017,6 +1017,8 @@ func (m *model) runLocalAction(id actionID, inputs []string) (string, error, boo
 func (m model) runActionCmd(spec actionSpec, inputs []string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := m.cancelCtx
+		// Non-blocking send: drop progress updates if the channel is full
+		// to avoid blocking Graph API calls on UI rendering.
 		m.client.SetProgressHook(func(text string) {
 			select {
 			case m.progressCh <- progressMsg{text: text}:

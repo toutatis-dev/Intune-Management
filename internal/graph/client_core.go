@@ -135,6 +135,10 @@ func NewClient() (*Client, error) {
 }
 
 func NewClientWithConfig(cfg config.AuthConfig) (*Client, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
 	var tokenCache azidentity.Cache
 	if c, err := cache.New(&cache.Options{Name: "intune-management"}); err == nil {
 		tokenCache = c
