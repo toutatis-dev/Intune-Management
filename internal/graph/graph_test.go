@@ -180,7 +180,7 @@ func TestClassifyWindowsVersion(t *testing.T) {
 }
 
 func TestLoadAuthRecordRejectsStaleCache(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel() — mutates package-level authRecordFilePath.
 
 	// Write a valid auth record to a temp file
 	dir := t.TempDir()
@@ -234,10 +234,10 @@ func TestLoadAuthRecordRejectsStaleCache(t *testing.T) {
 }
 
 func TestLoadAuthRecordRejectsSymlink(t *testing.T) {
+	// No t.Parallel() — mutates package-level authRecordFilePath.
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation requires elevated privileges on Windows")
 	}
-	t.Parallel()
 
 	dir := t.TempDir()
 	realPath := filepath.Join(dir, "real-auth.json")
