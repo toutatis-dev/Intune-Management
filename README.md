@@ -58,7 +58,9 @@ Start the tool by running the compiled executable:
 ```
 
 ### Authentication
-The tool uses Microsoft Graph's **Device Code Flow**. When an API call is made, the tool will present a device code. Visit [microsoft.com/devicelogin](https://microsoft.com/devicelogin), enter the code, and sign in with an account that has appropriate Intune/Azure AD permissions.
+The tool uses **Interactive Browser Authentication** by default — when an API call requires sign-in, your system browser opens for you to authenticate directly. This supports passkeys, conditional access policies, and all MFA methods.
+
+If a browser is not available (e.g., SSH or headless sessions), the tool automatically falls back to **Device Code Flow**, presenting a code to enter at [microsoft.com/devicelogin](https://microsoft.com/devicelogin).
 
 #### Custom App Registration (Recommended)
 By default, the tool uses the well-known Microsoft Graph PowerShell Client ID. While this works out-of-the-box for many tenants, it is highly recommended to create your own Azure AD (Entra ID) App Registration to adhere to security best practices and avoid potential conditional access blocks.
@@ -67,7 +69,11 @@ By default, the tool uses the well-known Microsoft Graph PowerShell Client ID. W
 2. Name the application (e.g., "Intune Management TUI").
 3. Under **Supported account types**, select **Accounts in this organizational directory only**.
 4. Click **Register**.
-5. In the left menu, go to **Authentication**. Under **Advanced settings**, set **Allow public client flows** to **Yes** and save.
+5. In the left menu, go to **Authentication**.
+   - Click **Add a platform** > **Mobile and desktop applications**.
+   - Add `http://localhost` as a redirect URI.
+   - Under **Advanced settings**, set **Allow public client flows** to **Yes**.
+   - Save.
 6. Go to **API permissions** and add the following **Delegated** Microsoft Graph permissions:
    - `User.Read.All`
    - `Group.ReadWrite.All`
