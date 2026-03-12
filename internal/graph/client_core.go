@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -248,8 +249,11 @@ func (g *Client) getToken(ctx context.Context) (string, error) {
 		}
 		record, authErr := g.cred.Authenticate(ctx, &opts)
 		if authErr != nil {
-			// If browser auth failed at runtime, fall back to device code.
-			if g.authMethod == "browser" {
+			// Only fall back to device code when the browser could not be
+			// launched (headless/SSH).  User cancellation, CA blocks, and
+			// transient errors should surface directly so the caller can
+			// retry browser auth rather than silently switching flows.
+			if g.authMethod == "browser" && isBrowserLaunchFailure(authErr) {
 				return g.fallbackToDeviceCode(ctx)
 			}
 			return "", authErr
@@ -273,6 +277,22 @@ func needsInteraction(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "AuthenticationRequiredError") || strings.Contains(msg, "interaction is required")
+}
+
+// isBrowserLaunchFailure returns true when the error indicates the system
+// browser could not be opened (e.g. headless server, no $DISPLAY, missing
+// xdg-open).  It intentionally excludes user cancellation, CA policy blocks,
+// and transient network errors so those surface to the caller for retry.
+func isBrowserLaunchFailure(err error) bool {
+	var execErr *exec.Error
+	if errors.As(err, &execErr) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "could not open browser") ||
+		strings.Contains(msg, "no browser") ||
+		strings.Contains(msg, "cannot open") ||
+		strings.Contains(msg, "display is not set")
 }
 
 func (g *Client) fallbackToDeviceCode(ctx context.Context) (string, error) {
