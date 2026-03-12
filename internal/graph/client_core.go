@@ -243,19 +243,24 @@ func (g *Client) emitProgress(text string) {
 }
 
 func (g *Client) getToken(ctx context.Context) (string, error) {
+	g.mu.Lock()
+	cred := g.cred
+	method := g.authMethod
+	g.mu.Unlock()
+
 	opts := policy.TokenRequestOptions{Scopes: g.scope}
-	token, err := g.cred.GetToken(ctx, opts)
+	token, err := cred.GetToken(ctx, opts)
 	if err != nil {
 		if !needsInteraction(err) {
 			return "", err
 		}
-		record, authErr := g.cred.Authenticate(ctx, &opts)
+		record, authErr := cred.Authenticate(ctx, &opts)
 		if authErr != nil {
 			// Only fall back to device code when the browser could not be
 			// launched (headless/SSH).  User cancellation, CA blocks, and
 			// transient errors should surface directly so the caller can
 			// retry browser auth rather than silently switching flows.
-			if g.authMethod == "browser" && isBrowserLaunchFailure(authErr) {
+			if method == "browser" && isBrowserLaunchFailure(authErr) {
 				return g.fallbackToDeviceCode(ctx)
 			}
 			return "", authErr
@@ -263,7 +268,7 @@ func (g *Client) getToken(ctx context.Context) (string, error) {
 		if saveErr := saveAuthRecord(record); saveErr != nil {
 			fmt.Fprintf(os.Stderr, "\u26a0 Warning: could not persist auth record: %v\n", saveErr)
 		}
-		token, err = g.cred.GetToken(ctx, opts)
+		token, err = cred.GetToken(ctx, opts)
 		if err != nil {
 			return "", err
 		}
