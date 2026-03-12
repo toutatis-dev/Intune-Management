@@ -113,7 +113,7 @@ func TestUserConfigDirCreatesDirectory(t *testing.T) {
 }
 
 func TestFilePathFallsBackToUserDir(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel() — mutates package-level userConfigDirFunc.
 
 	// Point UserConfigDir at a temp directory so the test doesn't
 	// depend on real %AppData% state.
@@ -135,7 +135,7 @@ func TestFilePathFallsBackToUserDir(t *testing.T) {
 }
 
 func TestSaveToFileWritesToUserDir(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel() — mutates package-level userConfigDirFunc.
 
 	// Point UserConfigDir at a temp directory to avoid writing to real %AppData%.
 	tmp := t.TempDir()
