@@ -105,17 +105,21 @@ func (e *graphRequestError) Error() string {
 
 var errNotFound = errors.New("not found")
 
-var authRecordFilePath = func() string {
-	exe, err := os.Executable()
+var authRecordFilePath = func() (string, error) {
+	dir, err := config.UserConfigDir()
 	if err != nil {
-		return "intune-management.auth.json"
+		return "", fmt.Errorf("cannot determine auth record path: %w", err)
 	}
-	return filepath.Join(filepath.Dir(exe), "intune-management.auth.json")
+	return filepath.Join(dir, "intune-management.auth.json"), nil
 }
 
 func loadAuthRecord(cfg config.AuthConfig) (azidentity.AuthenticationRecord, bool) {
 	var record azidentity.AuthenticationRecord
-	b, err := os.ReadFile(authRecordFilePath())
+	path, err := authRecordFilePath()
+	if err != nil {
+		return record, false
+	}
+	b, err := config.SafeReadFile(path)
 	if err != nil {
 		return record, false
 	}
@@ -135,11 +139,15 @@ func loadAuthRecord(cfg config.AuthConfig) (azidentity.AuthenticationRecord, boo
 }
 
 func saveAuthRecord(record azidentity.AuthenticationRecord) error {
+	path, err := authRecordFilePath()
+	if err != nil {
+		return err
+	}
 	b, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(authRecordFilePath(), b, 0600)
+	return os.WriteFile(path, b, 0600)
 }
 
 func NewClient() (*Client, error) {

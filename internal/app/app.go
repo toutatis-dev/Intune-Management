@@ -665,16 +665,12 @@ func (m *model) setPreview(text string) {
 	m.state = statePreview
 }
 
-func exportBaseDir() string {
-	exe, err := os.Executable()
+func exportBaseDir() (string, error) {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		cwd, cwdErr := os.Getwd()
-		if cwdErr != nil {
-			return "."
-		}
-		return cwd
+		return "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
-	return filepath.Dir(exe)
+	return home, nil
 }
 
 func slugifyName(s string) string {
@@ -705,7 +701,11 @@ func (m model) defaultExportPath() string {
 		name = "report"
 	}
 	stamp := time.Now().Format("20060102-150405")
-	return filepath.Join(exportBaseDir(), fmt.Sprintf("%s-%s.csv", name, stamp))
+	base, err := exportBaseDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, fmt.Sprintf("%s-%s.csv", name, stamp))
 }
 
 func helpTextForState(state menuState) string {
