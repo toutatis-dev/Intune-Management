@@ -4,15 +4,16 @@ First off, thank you for considering contributing to this project! We welcome al
 
 ## Development Setup
 
-1. **Prerequisites**: Ensure you have [Go](https://golang.org/doc/install) (version 1.21 or later) installed.
+1. **Prerequisites**: Ensure you have [Go](https://golang.org/doc/install) (version 1.22 or later) installed.
 2. **Fork and Clone**: Fork the repository on GitHub, then clone your fork locally:
    ```bash
    git clone https://github.com/<your-username>/Intune-Management.git
    cd Intune-Management
    ```
-3. **Run tests**:
+3. **Run vet and tests**:
    ```bash
-   go test ./...
+   go vet ./...
+   go test -race ./...
    ```
 4. **Build the application**:
    ```bash
@@ -32,11 +33,12 @@ This project follows standard Go project layouts:
 ## Pull Request Guidelines
 
 1. **Fork the repository** and create your branch from `main`.
-2. **Format your code**: We enforce strict `go fmt` formatting in our CI pipeline. Before committing, always run:
+2. **Format and vet your code**: We enforce `go fmt` and `go vet` in our CI pipeline. Before committing, always run:
    ```bash
    go fmt ./...
+   go vet ./...
    ```
-3. **Write tests**: If you are adding a new feature or fixing a bug, please include tests. Run `go test ./...` to ensure your changes don't break existing functionality.
+3. **Write tests**: If you are adding a new feature or fixing a bug, please include tests. Run `go test -race ./...` to ensure your changes don't break existing functionality or introduce data races.
 4. **Use Conventional Commits**: Try to use standard commit prefixes like `feat:`, `fix:`, `docs:`, `style:`, `refactor:`, etc.
 5. **Open a Pull Request**: Provide a clear description of the problem you are solving or the feature you are adding, and attach a screenshot if it involves a UI change.
 
