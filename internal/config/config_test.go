@@ -14,7 +14,12 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+)
 
 func TestAuthConfigValidate(t *testing.T) {
 	t.Parallel()
@@ -85,5 +90,118 @@ func TestAuthConfigValidate(t *testing.T) {
 				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestUserConfigDirCreatesDirectory(t *testing.T) {
+	t.Parallel()
+
+	dir, err := UserConfigDir()
+	if err != nil {
+		t.Fatalf("UserConfigDir() error: %v", err)
+	}
+	if dir == "" {
+		t.Fatal("UserConfigDir() returned empty string")
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("directory does not exist: %v", err)
+	}
+	if !fi.IsDir() {
+		t.Fatalf("expected directory, got %v", fi.Mode())
+	}
+}
+
+func TestFilePathFallsBackToUserDir(t *testing.T) {
+	t.Parallel()
+
+	// Point UserConfigDir at a temp directory so the test doesn't
+	// depend on real %AppData% state.
+	tmp := t.TempDir()
+	origFunc := userConfigDirFunc
+	userConfigDirFunc = func() (string, error) { return tmp, nil }
+	t.Cleanup(func() { userConfigDirFunc = origFunc })
+
+	// When no config file exists next to the exe, FilePath should
+	// return a path inside the user config directory.
+	path, err := FilePath()
+	if err != nil {
+		t.Fatalf("FilePath() error: %v", err)
+	}
+	expected := filepath.Join(tmp, "intune-management", configFileName)
+	if path != expected {
+		t.Fatalf("FilePath() = %q, want %q", path, expected)
+	}
+}
+
+func TestSaveToFileWritesToUserDir(t *testing.T) {
+	t.Parallel()
+
+	// Point UserConfigDir at a temp directory to avoid writing to real %AppData%.
+	tmp := t.TempDir()
+	origFunc := userConfigDirFunc
+	userConfigDirFunc = func() (string, error) { return tmp, nil }
+	t.Cleanup(func() { userConfigDirFunc = origFunc })
+
+	cfg := AuthConfig{
+		ClientID: "14d82eec-204b-4c2f-b7e8-296a70dab67e",
+		TenantID: "common",
+	}
+	if err := SaveToFile(cfg); err != nil {
+		t.Fatalf("SaveToFile() error: %v", err)
+	}
+
+	userDir, err := UserConfigDir()
+	if err != nil {
+		t.Fatalf("UserConfigDir() error: %v", err)
+	}
+	path := filepath.Join(userDir, configFileName)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("config file not found at user dir: %v", err)
+	}
+}
+
+func TestSafeReadFileRejectsSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated privileges on Windows")
+	}
+	t.Parallel()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.txt")
+	if err := os.WriteFile(target, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reading the real file should work
+	if _, err := SafeReadFile(target); err != nil {
+		t.Fatalf("SafeReadFile(real file) error: %v", err)
+	}
+
+	// Reading the symlink should fail
+	if _, err := SafeReadFile(link); err == nil {
+		t.Fatal("SafeReadFile(symlink) should have returned an error")
+	}
+}
+
+func TestSafeReadFileReadsRegularFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	want := []byte("hello world")
+	if err := os.WriteFile(path, want, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := SafeReadFile(path)
+	if err != nil {
+		t.Fatalf("SafeReadFile() error: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("SafeReadFile() = %q, want %q", got, want)
 	}
 }

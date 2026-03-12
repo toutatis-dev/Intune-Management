@@ -20,6 +20,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -202,7 +203,7 @@ func TestLoadAuthRecordRejectsStaleCache(t *testing.T) {
 
 	// Override auth record path for the test
 	origFunc := authRecordFilePath
-	authRecordFilePath = func() string { return recordPath }
+	authRecordFilePath = func() (string, error) { return recordPath, nil }
 	t.Cleanup(func() { authRecordFilePath = origFunc })
 
 	// Matching config should load the record
@@ -229,6 +230,62 @@ func TestLoadAuthRecordRejectsStaleCache(t *testing.T) {
 	cfg.ClientID = "aaaa-bbbb-cccc"
 	if _, ok := loadAuthRecord(cfg); !ok {
 		t.Fatal("expected auth record to load when config uses 'common' tenant")
+	}
+}
+
+func TestLoadAuthRecordRejectsSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated privileges on Windows")
+	}
+	t.Parallel()
+
+	dir := t.TempDir()
+	realPath := filepath.Join(dir, "real-auth.json")
+	record := azidentity.AuthenticationRecord{
+		Authority:     "https://login.microsoftonline.com",
+		ClientID:      "aaaa-bbbb-cccc",
+		HomeAccountID: "home-id",
+		TenantID:      "tenant-id",
+		Username:      "user@example.com",
+		Version:       "1.0",
+	}
+	b, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(realPath, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	linkPath := filepath.Join(dir, "link-auth.json")
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	origFunc := authRecordFilePath
+	authRecordFilePath = func() (string, error) { return linkPath, nil }
+	t.Cleanup(func() { authRecordFilePath = origFunc })
+
+	cfg := config.AuthConfig{ClientID: "aaaa-bbbb-cccc", TenantID: "tenant-id"}
+	if _, ok := loadAuthRecord(cfg); ok {
+		t.Fatal("expected auth record to be rejected when path is a symlink")
+	}
+}
+
+func TestAuthRecordPathUsesUserConfigDir(t *testing.T) {
+	t.Parallel()
+
+	path, err := authRecordFilePath()
+	if err != nil {
+		t.Fatalf("authRecordFilePath() error: %v", err)
+	}
+	userDir, err := config.UserConfigDir()
+	if err != nil {
+		t.Fatalf("UserConfigDir() error: %v", err)
+	}
+	expected := filepath.Join(userDir, "intune-management.auth.json")
+	if path != expected {
+		t.Fatalf("authRecordFilePath() = %q, want %q", path, expected)
 	}
 }
 

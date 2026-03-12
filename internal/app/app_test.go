@@ -110,11 +110,19 @@ func TestSlugifyNameAndDefaultExportPath(t *testing.T) {
 
 	m := model{lastActionLabel: "Windows OS Breakdown"}
 	path := m.defaultExportPath()
+	wantDir, err := exportBaseDir()
+	if err != nil {
+		// If exportBaseDir fails, defaultExportPath should return empty.
+		if path != "" {
+			t.Fatalf("expected empty path when exportBaseDir fails, got %q", path)
+		}
+		return
+	}
 	if filepath.Ext(path) != ".csv" {
 		t.Fatalf("expected csv extension, got %q", path)
 	}
-	if filepath.Dir(path) != exportBaseDir() {
-		t.Fatalf("expected export path under %q, got %q", exportBaseDir(), filepath.Dir(path))
+	if filepath.Dir(path) != wantDir {
+		t.Fatalf("expected export path under %q, got %q", wantDir, filepath.Dir(path))
 	}
 	base := filepath.Base(path)
 	matched, err := regexp.MatchString(`^windows-os-breakdown-\d{8}-\d{6}\.csv$`, base)

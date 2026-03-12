@@ -16,6 +16,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,6 +24,8 @@ import (
 )
 
 const DefaultClientID = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
+
+const configFileName = "intune-management.config.json"
 
 type AuthConfig struct {
 	ClientID string
@@ -53,17 +56,61 @@ func (c AuthConfig) Validate() error {
 	return nil
 }
 
-func FilePath() string {
-	exe, err := os.Executable()
+var userConfigDirFunc = os.UserConfigDir
+
+// UserConfigDir returns the user-scoped configuration directory for
+// intune-management, creating it with mode 0700 if it does not exist.
+func UserConfigDir() (string, error) {
+	base, err := userConfigDirFunc()
 	if err != nil {
-		return "intune-management.config.json"
+		return "", fmt.Errorf("cannot determine user config directory: %w", err)
 	}
-	return filepath.Join(filepath.Dir(exe), "intune-management.config.json")
+	dir := filepath.Join(base, "intune-management")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("cannot create config directory: %w", err)
+	}
+	return dir, nil
+}
+
+// SafeReadFile reads a file after verifying it is not a symlink.
+func SafeReadFile(path string) ([]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("refusing to read symlink: " + path)
+	}
+	return os.ReadFile(path)
+}
+
+// FilePath returns the path to the config file to read from. It searches:
+// 1. The exe directory (IT-managed defaults)
+// 2. The user config directory (user overrides)
+// If neither exists, returns the user config dir path (where saves will go).
+func FilePath() (string, error) {
+	// Check exe directory first
+	if exe, err := os.Executable(); err == nil {
+		exePath := filepath.Join(filepath.Dir(exe), configFileName)
+		if fi, err := os.Lstat(exePath); err == nil && fi.Mode()&os.ModeSymlink == 0 {
+			return exePath, nil
+		}
+	}
+
+	// Check / default to user config directory
+	userDir, err := UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(userDir, configFileName), nil
 }
 
 func LoadFromFile() (AuthConfig, error) {
-	path := FilePath()
-	b, err := os.ReadFile(path)
+	path, err := FilePath()
+	if err != nil {
+		return AuthConfig{}, err
+	}
+	b, err := SafeReadFile(path)
 	if err != nil {
 		return AuthConfig{}, err
 	}
@@ -74,8 +121,13 @@ func LoadFromFile() (AuthConfig, error) {
 	return cfg, nil
 }
 
+// SaveToFile always writes to the user config directory.
 func SaveToFile(cfg AuthConfig) error {
-	path := FilePath()
+	userDir, err := UserConfigDir()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(userDir, configFileName)
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
