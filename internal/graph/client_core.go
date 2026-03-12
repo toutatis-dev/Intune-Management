@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -58,6 +59,7 @@ type authenticator interface {
 }
 
 type Client struct {
+	mu           sync.Mutex
 	cred         authenticator
 	http         *http.Client
 	scope        []string
@@ -291,7 +293,7 @@ func isBrowserLaunchFailure(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "could not open browser") ||
 		strings.Contains(msg, "no browser") ||
-		strings.Contains(msg, "cannot open") ||
+		strings.Contains(msg, "cannot open browser") ||
 		strings.Contains(msg, "display is not set")
 }
 
@@ -305,21 +307,27 @@ func (g *Client) fallbackToDeviceCode(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	g.cred = cred
-	g.authMethod = "device_code"
 
+	// Authenticate with the local credential before swapping onto the
+	// Client so that concurrent callers are not affected mid-auth.
 	opts := policy.TokenRequestOptions{Scopes: g.scope}
-	authRecord, err := g.cred.Authenticate(ctx, &opts)
+	authRecord, err := cred.Authenticate(ctx, &opts)
 	if err != nil {
 		return "", err
 	}
 	if saveErr := saveAuthRecord(authRecord); saveErr != nil {
 		fmt.Fprintf(os.Stderr, "\u26a0 Warning: could not persist auth record: %v\n", saveErr)
 	}
-	tok, err := g.cred.GetToken(ctx, opts)
+	tok, err := cred.GetToken(ctx, opts)
 	if err != nil {
 		return "", err
 	}
+
+	g.mu.Lock()
+	g.cred = cred
+	g.authMethod = "device_code"
+	g.mu.Unlock()
+
 	return tok.Token, nil
 }
 
