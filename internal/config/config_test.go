@@ -60,7 +60,17 @@ func TestAuthConfigValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "malformed tenant ID",
+			name:    "valid onmicrosoft.com domain tenant",
+			cfg:     AuthConfig{ClientID: "14d82eec-204b-4c2f-b7e8-296a70dab67e", TenantID: "contoso.onmicrosoft.com"},
+			wantErr: false,
+		},
+		{
+			name:    "valid custom domain tenant",
+			cfg:     AuthConfig{ClientID: "14d82eec-204b-4c2f-b7e8-296a70dab67e", TenantID: "contoso.com"},
+			wantErr: false,
+		},
+		{
+			name:    "malformed tenant ID - bare label without dot",
 			cfg:     AuthConfig{ClientID: "14d82eec-204b-4c2f-b7e8-296a70dab67e", TenantID: "my-tenant"},
 			wantErr: true,
 		},
