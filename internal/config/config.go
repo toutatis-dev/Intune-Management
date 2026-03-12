@@ -31,9 +31,13 @@ type AuthConfig struct {
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
+// domainPattern matches a valid DNS hostname with at least one dot, e.g. contoso.onmicrosoft.com.
+var domainPattern = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)+$`)
+
 // Validate checks that ClientID and TenantID are well-formed.
-// ClientID must be a UUID. TenantID must be a UUID or one of the
-// well-known Azure AD aliases ("common", "organizations", "consumers").
+// ClientID must be a UUID. TenantID must be a UUID, a domain name
+// (e.g. contoso.onmicrosoft.com), or one of the well-known Azure AD
+// aliases ("common", "organizations", "consumers").
 func (c AuthConfig) Validate() error {
 	if !uuidPattern.MatchString(c.ClientID) {
 		return fmt.Errorf("invalid client ID %q: must be a UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)", c.ClientID)
@@ -42,8 +46,8 @@ func (c AuthConfig) Validate() error {
 	case "common", "organizations", "consumers":
 		return nil
 	default:
-		if !uuidPattern.MatchString(c.TenantID) {
-			return fmt.Errorf("invalid tenant ID %q: must be a UUID or one of \"common\", \"organizations\", \"consumers\"", c.TenantID)
+		if !uuidPattern.MatchString(c.TenantID) && !domainPattern.MatchString(c.TenantID) {
+			return fmt.Errorf("invalid tenant ID %q: must be a UUID, a domain (e.g. contoso.onmicrosoft.com), or one of \"common\", \"organizations\", \"consumers\"", c.TenantID)
 		}
 	}
 	return nil
