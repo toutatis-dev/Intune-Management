@@ -24,11 +24,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity/cache"
@@ -48,11 +51,20 @@ var requiredScopes = []string{
 
 const graphBase = "https://graph.microsoft.com/v1.0"
 
+// authenticator extends azcore.TokenCredential with the Authenticate method
+// shared by InteractiveBrowserCredential and DeviceCodeCredential.
+type authenticator interface {
+	azcore.TokenCredential
+	Authenticate(ctx context.Context, opts *policy.TokenRequestOptions) (azidentity.AuthenticationRecord, error)
+}
+
 type Client struct {
-	cred         *azidentity.DeviceCodeCredential
+	mu           sync.Mutex
+	cred         authenticator
 	http         *http.Client
 	scope        []string
 	cfg          config.AuthConfig
+	authMethod   string // "browser" or "device_code"
 	progressHook func(string)
 }
 
@@ -144,6 +156,49 @@ func NewClientWithConfig(cfg config.AuthConfig) (*Client, error) {
 		tokenCache = c
 	}
 
+	record, hasRecord := loadAuthRecord(cfg)
+
+	// Try interactive browser auth first — supports passkeys, conditional
+	// access, and all MFA methods.  Falls back to device code for headless
+	// or SSH sessions where a browser isn't available.
+	cred, method, err := newBrowserCredential(cfg, tokenCache, record, hasRecord)
+	if err != nil {
+		cred, method, err = newDeviceCodeCredential(cfg, tokenCache, record, hasRecord)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &Client{
+		cred:       cred,
+		http:       &http.Client{Timeout: 60 * time.Second},
+		scope:      requiredScopes,
+		cfg:        cfg,
+		authMethod: method,
+	}, nil
+}
+
+const redirectURL = "http://localhost"
+
+func newBrowserCredential(cfg config.AuthConfig, tokenCache azidentity.Cache, record azidentity.AuthenticationRecord, hasRecord bool) (authenticator, string, error) {
+	opts := &azidentity.InteractiveBrowserCredentialOptions{
+		ClientID:                       cfg.ClientID,
+		TenantID:                       cfg.TenantID,
+		Cache:                          tokenCache,
+		DisableAutomaticAuthentication: true,
+		RedirectURL:                    redirectURL,
+	}
+	if hasRecord {
+		opts.AuthenticationRecord = record
+	}
+	cred, err := azidentity.NewInteractiveBrowserCredential(opts)
+	if err != nil {
+		return nil, "", err
+	}
+	return cred, "browser", nil
+}
+
+func newDeviceCodeCredential(cfg config.AuthConfig, tokenCache azidentity.Cache, record azidentity.AuthenticationRecord, hasRecord bool) (authenticator, string, error) {
 	opts := &azidentity.DeviceCodeCredentialOptions{
 		ClientID:                       cfg.ClientID,
 		TenantID:                       cfg.TenantID,
@@ -163,22 +218,14 @@ func NewClientWithConfig(cfg config.AuthConfig) (*Client, error) {
 			return nil
 		},
 	}
-
-	if record, ok := loadAuthRecord(cfg); ok {
+	if hasRecord {
 		opts.AuthenticationRecord = record
 	}
-
 	cred, err := azidentity.NewDeviceCodeCredential(opts)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-
-	return &Client{
-		cred:  cred,
-		http:  &http.Client{Timeout: 60 * time.Second},
-		scope: requiredScopes,
-		cfg:   cfg,
-	}, nil
+	return cred, "device_code", nil
 }
 
 func (g *Client) Config() config.AuthConfig {
@@ -196,27 +243,97 @@ func (g *Client) emitProgress(text string) {
 }
 
 func (g *Client) getToken(ctx context.Context) (string, error) {
+	g.mu.Lock()
+	cred := g.cred
+	method := g.authMethod
+	g.mu.Unlock()
+
 	opts := policy.TokenRequestOptions{Scopes: g.scope}
-	token, err := g.cred.GetToken(ctx, opts)
+	token, err := cred.GetToken(ctx, opts)
 	if err != nil {
-		var authErr *azidentity.AuthenticationRequiredError
-		if errors.As(err, &authErr) || strings.Contains(err.Error(), "AuthenticationRequiredError") || strings.Contains(err.Error(), "interaction is required") {
-			record, authErr2 := g.cred.Authenticate(ctx, &opts)
-			if authErr2 != nil {
-				return "", authErr2
-			}
-			if saveErr := saveAuthRecord(record); saveErr != nil {
-				fmt.Fprintf(os.Stderr, "⚠ Warning: could not persist auth record: %v\n", saveErr)
-			}
-			token, err = g.cred.GetToken(ctx, opts)
-			if err != nil {
-				return "", err
-			}
-			return token.Token, nil
+		if !needsInteraction(err) {
+			return "", err
 		}
-		return "", err
+		record, authErr := cred.Authenticate(ctx, &opts)
+		if authErr != nil {
+			// Only fall back to device code when the browser could not be
+			// launched (headless/SSH).  User cancellation, CA blocks, and
+			// transient errors should surface directly so the caller can
+			// retry browser auth rather than silently switching flows.
+			if method == "browser" && isBrowserLaunchFailure(authErr) {
+				return g.fallbackToDeviceCode(ctx)
+			}
+			return "", authErr
+		}
+		if saveErr := saveAuthRecord(record); saveErr != nil {
+			fmt.Fprintf(os.Stderr, "\u26a0 Warning: could not persist auth record: %v\n", saveErr)
+		}
+		token, err = cred.GetToken(ctx, opts)
+		if err != nil {
+			return "", err
+		}
+		return token.Token, nil
 	}
 	return token.Token, nil
+}
+
+func needsInteraction(err error) bool {
+	var authErr *azidentity.AuthenticationRequiredError
+	if errors.As(err, &authErr) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "AuthenticationRequiredError") || strings.Contains(msg, "interaction is required")
+}
+
+// isBrowserLaunchFailure returns true when the error indicates the system
+// browser could not be opened (e.g. headless server, no $DISPLAY, missing
+// xdg-open).  It intentionally excludes user cancellation, CA policy blocks,
+// and transient network errors so those surface to the caller for retry.
+func isBrowserLaunchFailure(err error) bool {
+	var execErr *exec.Error
+	if errors.As(err, &execErr) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "could not open browser") ||
+		strings.Contains(msg, "no browser") ||
+		strings.Contains(msg, "cannot open browser") ||
+		strings.Contains(msg, "display is not set")
+}
+
+func (g *Client) fallbackToDeviceCode(ctx context.Context) (string, error) {
+	var tokenCache azidentity.Cache
+	if c, err := cache.New(&cache.Options{Name: "intune-management"}); err == nil {
+		tokenCache = c
+	}
+	record, hasRecord := loadAuthRecord(g.cfg)
+	cred, _, err := newDeviceCodeCredential(g.cfg, tokenCache, record, hasRecord)
+	if err != nil {
+		return "", err
+	}
+
+	// Authenticate with the local credential before swapping onto the
+	// Client so that concurrent callers are not affected mid-auth.
+	opts := policy.TokenRequestOptions{Scopes: g.scope}
+	authRecord, err := cred.Authenticate(ctx, &opts)
+	if err != nil {
+		return "", err
+	}
+	if saveErr := saveAuthRecord(authRecord); saveErr != nil {
+		fmt.Fprintf(os.Stderr, "\u26a0 Warning: could not persist auth record: %v\n", saveErr)
+	}
+	tok, err := cred.GetToken(ctx, opts)
+	if err != nil {
+		return "", err
+	}
+
+	g.mu.Lock()
+	g.cred = cred
+	g.authMethod = "device_code"
+	g.mu.Unlock()
+
+	return tok.Token, nil
 }
 
 func (g *Client) do(ctx context.Context, method, fullURL string, body any) ([]byte, error) {
@@ -460,6 +577,7 @@ func (g *Client) AuthHealth(ctx context.Context) (string, error) {
 	tokenScopes := asString(claims["scp"])
 
 	return render.RenderInspector("Auth Health", [][2]string{
+		{"Auth Method", g.authMethod},
 		{"Configured Client ID", g.cfg.ClientID},
 		{"Configured Tenant ID", g.cfg.TenantID},
 		{"Token Client ID", effectiveClient},
