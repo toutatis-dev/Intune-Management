@@ -182,19 +182,39 @@ func (g *Client) ReportTopFailingApps(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Build batch requests — one per app for device statuses.
+	reqs := make([]batchRequest, len(apps))
+	for i, app := range apps {
+		reqs[i] = batchRequest{
+			ID:     fmt.Sprintf("%d", i),
+			Method: "GET",
+			URL:    fmt.Sprintf("/deviceAppManagement/mobileApps/%s/deviceStatuses?$select=installState,deviceId", asString(app["id"])),
+		}
+	}
+	responses, err := g.batch(ctx, reqs)
+	if err != nil {
+		return "", err
+	}
 	stats := make([]appFailureStat, 0, len(apps))
 	summary := failingAppsSummary{Scanned: len(apps)}
-	for i, app := range apps {
-		if (i+1)%20 == 0 {
-			g.emitProgress(fmt.Sprintf("Processed %d/%d apps...", i+1, len(apps)))
-		}
-		appID := asString(app["id"])
-		statuses, err := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/deviceStatuses?$select=installState,deviceId", appID))
+	for i, resp := range responses {
+		result, err := parseBatchValues(resp)
 		if err != nil {
 			summary.Skipped++
 			continue
 		}
-		stat := appFailureStat{ID: appID, Name: asString(app["displayName"]), Total: len(statuses)}
+		statuses := result.Values
+		// Fall back to sequential pagination for the rare paginated response.
+		if result.NextLink != "" {
+			extra, err := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/deviceStatuses?$select=installState,deviceId", asString(apps[i]["id"])))
+			if err != nil {
+				summary.Skipped++
+				continue
+			}
+			statuses = extra
+		}
+		appID := asString(apps[i]["id"])
+		stat := appFailureStat{ID: appID, Name: asString(apps[i]["displayName"]), Total: len(statuses)}
 		for _, s := range statuses {
 			if strings.EqualFold(strings.TrimSpace(asString(s["installState"])), "failed") {
 				stat.Failed++

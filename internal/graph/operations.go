@@ -454,16 +454,35 @@ func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
 		groupNameCache[groupID] = name
 		return name
 	}
-	skipped := 0
+	// Build batch requests — one per app for assignments.
+	reqs := make([]batchRequest, len(apps))
 	for i, app := range apps {
-		if (i+1)%20 == 0 {
-			g.emitProgress(fmt.Sprintf("Processed %d/%d apps...", i+1, len(apps)))
+		reqs[i] = batchRequest{
+			ID:     fmt.Sprintf("%d", i),
+			Method: "GET",
+			URL:    fmt.Sprintf("/deviceAppManagement/mobileApps/%s/assignments?$select=id,intent,target", asString(app["id"])),
 		}
-		appID := asString(app["id"])
-		assignments, err := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/assignments?$select=id,intent,target", appID))
+	}
+	responses, err := g.batch(ctx, reqs)
+	if err != nil {
+		return "", err
+	}
+	skipped := 0
+	for i, resp := range responses {
+		result, err := parseBatchValues(resp)
 		if err != nil {
 			skipped++
 			continue
+		}
+		assignments := result.Values
+		// Fall back to sequential pagination for the rare paginated response.
+		if result.NextLink != "" {
+			extra, err := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/assignments?$select=id,intent,target", asString(apps[i]["id"])))
+			if err != nil {
+				skipped++
+				continue
+			}
+			assignments = extra
 		}
 		for _, a := range assignments {
 			target, ok := a["target"].(map[string]any)
@@ -479,7 +498,7 @@ func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
 				continue
 			}
 			rows = append(rows, row{
-				AppName:      asString(app["displayName"]),
+				AppName:      asString(apps[i]["displayName"]),
 				GroupName:    groupName,
 				AssignmentID: asString(a["id"]),
 				Intent:       asString(a["intent"]),
