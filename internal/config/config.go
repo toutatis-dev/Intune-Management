@@ -85,11 +85,22 @@ func SafeReadFile(path string) ([]byte, error) {
 }
 
 // FilePath returns the path to the config file to read from. It searches:
-// 1. The exe directory (IT-managed defaults)
-// 2. The user config directory (user overrides)
+// 1. The user config directory (user overrides / saves)
+// 2. The exe directory (IT-managed defaults)
 // If neither exists, returns the user config dir path (where saves will go).
 func FilePath() (string, error) {
-	// Check exe directory first
+	// Check user config directory first so user-saved settings
+	// take precedence over the exe-directory default.
+	userDir, err := UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	userPath := filepath.Join(userDir, configFileName)
+	if fi, err := os.Lstat(userPath); err == nil && fi.Mode()&os.ModeSymlink == 0 {
+		return userPath, nil
+	}
+
+	// Fall back to exe directory (IT-managed defaults)
 	if exe, err := os.Executable(); err == nil {
 		exePath := filepath.Join(filepath.Dir(exe), configFileName)
 		if fi, err := os.Lstat(exePath); err == nil && fi.Mode()&os.ModeSymlink == 0 {
@@ -97,12 +108,8 @@ func FilePath() (string, error) {
 		}
 	}
 
-	// Check / default to user config directory
-	userDir, err := UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(userDir, configFileName), nil
+	// Neither exists — return user path (where SaveToFile will write)
+	return userPath, nil
 }
 
 func LoadFromFile() (AuthConfig, error) {
