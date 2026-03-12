@@ -42,7 +42,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21.x'
+          go-version: '1.22.x'
           cache: true
 
       - name: Verify Formatting (Linux only)
@@ -53,9 +53,13 @@ jobs:
             exit 1
           fi
 
+      - name: Vet (Linux only)
+        if: matrix.os == 'ubuntu-latest' && matrix.goos == 'linux'
+        run: go vet ./...
+
       - name: Run Tests (Linux only)
         if: matrix.os == 'ubuntu-latest' && matrix.goos == 'linux'
-        run: go test -v ./...
+        run: go test -race -v ./...
 
       - name: Build Binary
         env:
