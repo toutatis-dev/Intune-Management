@@ -484,9 +484,10 @@ func friendlyAppType(odataType string) string {
 }
 
 func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
-	// $select is omitted because subtype fields like displayVersion and
-	// isAssigned are not valid in $select on the base mobileApp type.
-	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps")
+	// Only select base-type-valid fields; subtype fields (displayVersion,
+	// isAssigned) are fetched via individual detail requests below.
+	// @odata.type is returned automatically and is invalid in $select.
+	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName,publisher")
 	if err != nil {
 		return "", err
 	}
@@ -505,12 +506,15 @@ func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	var detailFailed int
 	for i, resp := range detailResps {
 		if i >= len(apps) || resp.Status < 200 || resp.Status >= 300 {
+			detailFailed++
 			continue
 		}
 		var detail map[string]any
 		if json.Unmarshal(resp.Body, &detail) != nil {
+			detailFailed++
 			continue
 		}
 		if v, ok := detail["displayVersion"]; ok {
@@ -519,6 +523,9 @@ func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
 		if v, ok := detail["isAssigned"]; ok {
 			apps[i]["isAssigned"] = v
 		}
+	}
+	if detailFailed > 0 {
+		g.emitProgress(fmt.Sprintf("Warning: %d/%d app detail requests failed; some version info may be missing", detailFailed, len(detailResps)))
 	}
 
 	type row struct {
