@@ -484,7 +484,10 @@ func friendlyAppType(odataType string) string {
 }
 
 func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
-	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,@odata.type,displayName,isAssigned,publisher,displayVersion")
+	// @odata.type, isAssigned, and displayVersion live on subtypes or are
+	// computed — they are not valid in $select on the base mobileApp type
+	// but are returned automatically by Graph.
+	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName,publisher")
 	if err != nil {
 		return "", err
 	}
