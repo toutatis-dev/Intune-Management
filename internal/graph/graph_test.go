@@ -289,6 +289,34 @@ func TestAuthRecordPathUsesUserConfigDir(t *testing.T) {
 	}
 }
 
+func TestFriendlyAppType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		odataType string
+		want      string
+	}{
+		{"#microsoft.graph.win32LobApp", "Win32"},
+		{"#microsoft.graph.iosStoreApp", "iOS Store"},
+		{"#microsoft.graph.webApp", "Web"},
+		{"#microsoft.graph.macOSDmgApp", "macOS DMG"},
+		{"#microsoft.graph.winGetApp", "WinGet"},
+		{"#microsoft.graph.officeSuiteApp", "Microsoft 365"},
+		{"#microsoft.graph.someNewAppType", "someNewAppType"},
+		{"noPrefix", "noPrefix"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.odataType, func(t *testing.T) {
+			t.Parallel()
+			if got := friendlyAppType(tt.odataType); got != tt.want {
+				t.Fatalf("friendlyAppType(%q) = %q, want %q", tt.odataType, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRenderTopFailingAppsReportExcludesZeroFailuresAndShowsSkipped(t *testing.T) {
 	t.Parallel()
 

@@ -423,16 +423,71 @@ func (g *Client) AddAppsCSV(ctx context.Context, csvPath string, dryRun bool) (s
 	return b.String(), nil
 }
 
+func friendlyAppType(odataType string) string {
+	suffix := strings.TrimPrefix(odataType, "#microsoft.graph.")
+	if suffix == odataType {
+		return odataType // no prefix found
+	}
+	switch suffix {
+	case "win32LobApp":
+		return "Win32"
+	case "windowsMicrosoftEdgeApp":
+		return "Edge"
+	case "winGetApp":
+		return "WinGet"
+	case "microsoftStoreForBusinessApp":
+		return "Store for Business"
+	case "officeSuiteApp":
+		return "Microsoft 365"
+	case "windowsUniversalAppX":
+		return "UWP/APPX"
+	case "windowsMobileMSI":
+		return "MSI"
+	case "windowsWebApp":
+		return "Windows Web"
+	case "webApp":
+		return "Web"
+	case "iosStoreApp":
+		return "iOS Store"
+	case "iosVppApp":
+		return "iOS VPP"
+	case "managedIOSStoreApp":
+		return "Managed iOS"
+	case "androidStoreApp":
+		return "Android Store"
+	case "androidManagedStoreApp":
+		return "Android Managed"
+	case "androidForWorkApp":
+		return "Android for Work"
+	case "managedAndroidStoreApp":
+		return "Managed Android"
+	case "macOSDmgApp":
+		return "macOS DMG"
+	case "macOSLobApp":
+		return "macOS LOB"
+	case "macOSMicrosoftEdgeApp":
+		return "macOS Edge"
+	case "macOSMicrosoftDefenderApp":
+		return "macOS Defender"
+	case "macOSOfficeSuiteApp":
+		return "macOS Office"
+	default:
+		return suffix
+	}
+}
+
 func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
-	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName")
+	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName,isAssigned,publisher,displayVersion")
 	if err != nil {
 		return "", err
 	}
 	type row struct {
-		AppName      string
-		GroupName    string
-		AssignmentID string
-		Intent       string
+		AppName   string
+		AppType   string
+		Publisher string
+		Version   string
+		GroupName string
+		Intent    string
 	}
 	var rows []row
 	groupNameCache := map[string]string{}
@@ -468,6 +523,7 @@ func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
 		return "", err
 	}
 	skipped := 0
+	hasAssignment := make([]bool, len(apps))
 	for i, resp := range responses {
 		result, err := parseBatchValues(resp)
 		if err != nil {
@@ -497,13 +553,51 @@ func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
 			if groupName == "" {
 				continue
 			}
+			hasAssignment[i] = true
+			publisher := asString(apps[i]["publisher"])
+			if publisher == "" {
+				publisher = "-"
+			}
+			version := asString(apps[i]["displayVersion"])
+			if version == "" {
+				version = "-"
+			}
 			rows = append(rows, row{
-				AppName:      asString(apps[i]["displayName"]),
-				GroupName:    groupName,
-				AssignmentID: asString(a["id"]),
-				Intent:       asString(a["intent"]),
+				AppName:   asString(apps[i]["displayName"]),
+				AppType:   friendlyAppType(asString(apps[i]["@odata.type"])),
+				Publisher: publisher,
+				Version:   version,
+				GroupName: groupName,
+				Intent:    asString(a["intent"]),
 			})
 		}
+	}
+
+	// Add orphaned/unassigned apps.
+	for i, app := range apps {
+		if hasAssignment[i] {
+			continue
+		}
+		assigned, _ := app["isAssigned"].(bool)
+		if assigned {
+			continue
+		}
+		publisher := asString(app["publisher"])
+		if publisher == "" {
+			publisher = "-"
+		}
+		version := asString(app["displayVersion"])
+		if version == "" {
+			version = "-"
+		}
+		rows = append(rows, row{
+			AppName:   asString(app["displayName"]),
+			AppType:   friendlyAppType(asString(app["@odata.type"])),
+			Publisher: publisher,
+			Version:   version,
+			GroupName: "(none)",
+			Intent:    "(unassigned)",
+		})
 	}
 
 	var b strings.Builder
@@ -512,9 +606,9 @@ func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
 	}
 	tabRows := make([][]string, 0, len(rows))
 	for _, r := range rows {
-		tabRows = append(tabRows, []string{r.AppName, r.GroupName, r.AssignmentID, r.Intent})
+		tabRows = append(tabRows, []string{r.AppName, r.AppType, r.Publisher, r.Version, r.GroupName, r.Intent})
 	}
-	fmt.Fprintf(&b, "App-group assignments: %d\n\n%s", len(rows), render.RenderTable([]string{"App", "Group", "Assignment ID", "Intent"}, tabRows))
+	fmt.Fprintf(&b, "App-group assignments: %d\n\n%s", len(rows), render.RenderTable([]string{"App", "Type", "Publisher", "Version", "Group", "Intent"}, tabRows))
 	if skipped > 0 {
 		fmt.Fprintf(&b, "\n(%d apps skipped due to errors)", skipped)
 	}
