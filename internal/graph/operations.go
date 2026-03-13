@@ -423,6 +423,13 @@ func (g *Client) AddAppsCSV(ctx context.Context, csvPath string, dryRun bool) (s
 	return b.String(), nil
 }
 
+func valueOrDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
 func friendlyAppType(odataType string) string {
 	suffix := strings.TrimPrefix(odataType, "#microsoft.graph.")
 	if suffix == odataType {
@@ -477,7 +484,7 @@ func friendlyAppType(odataType string) string {
 }
 
 func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
-	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName,isAssigned,publisher,displayVersion")
+	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,@odata.type,displayName,isAssigned,publisher,displayVersion")
 	if err != nil {
 		return "", err
 	}
@@ -522,6 +529,9 @@ func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if len(responses) != len(apps) {
+		return "", fmt.Errorf("batch response count %d does not match app count %d", len(responses), len(apps))
+	}
 	skipped := 0
 	hasAssignment := make([]bool, len(apps))
 	for i, resp := range responses {
@@ -554,26 +564,20 @@ func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
 				continue
 			}
 			hasAssignment[i] = true
-			publisher := asString(apps[i]["publisher"])
-			if publisher == "" {
-				publisher = "-"
-			}
-			version := asString(apps[i]["displayVersion"])
-			if version == "" {
-				version = "-"
-			}
 			rows = append(rows, row{
 				AppName:   asString(apps[i]["displayName"]),
 				AppType:   friendlyAppType(asString(apps[i]["@odata.type"])),
-				Publisher: publisher,
-				Version:   version,
+				Publisher: valueOrDash(asString(apps[i]["publisher"])),
+				Version:   valueOrDash(asString(apps[i]["displayVersion"])),
 				GroupName: groupName,
 				Intent:    asString(a["intent"]),
 			})
 		}
 	}
 
-	// Add orphaned/unassigned apps.
+	// Add orphaned/unassigned apps. Apps with isAssigned=true but no group
+	// rows (e.g. all-users/all-devices targeting) are intentionally excluded —
+	// they aren't orphaned, they just don't target a specific group.
 	for i, app := range apps {
 		if hasAssignment[i] {
 			continue
@@ -582,19 +586,11 @@ func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
 		if assigned {
 			continue
 		}
-		publisher := asString(app["publisher"])
-		if publisher == "" {
-			publisher = "-"
-		}
-		version := asString(app["displayVersion"])
-		if version == "" {
-			version = "-"
-		}
 		rows = append(rows, row{
 			AppName:   asString(app["displayName"]),
 			AppType:   friendlyAppType(asString(app["@odata.type"])),
-			Publisher: publisher,
-			Version:   version,
+			Publisher: valueOrDash(asString(app["publisher"])),
+			Version:   valueOrDash(asString(app["displayVersion"])),
 			GroupName: "(none)",
 			Intent:    "(unassigned)",
 		})

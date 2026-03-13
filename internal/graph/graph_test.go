@@ -317,6 +317,17 @@ func TestFriendlyAppType(t *testing.T) {
 	}
 }
 
+func TestValueOrDash(t *testing.T) {
+	t.Parallel()
+
+	if got := valueOrDash(""); got != "-" {
+		t.Fatalf("valueOrDash(%q) = %q, want %q", "", got, "-")
+	}
+	if got := valueOrDash("Contoso"); got != "Contoso" {
+		t.Fatalf("valueOrDash(%q) = %q, want %q", "Contoso", got, "Contoso")
+	}
+}
+
 func TestRenderTopFailingAppsReportExcludesZeroFailuresAndShowsSkipped(t *testing.T) {
 	t.Parallel()
 
