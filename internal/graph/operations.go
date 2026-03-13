@@ -501,7 +501,7 @@ func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
 			URL:    fmt.Sprintf("/deviceAppManagement/mobileApps/%s", asString(app["id"])),
 		}
 	}
-	detailResps, err := g.batch(ctx, detailReqs)
+	detailResps, err := g.batchWithEndpoint(ctx, detailReqs, graphBeta)
 	if err != nil {
 		return "", err
 	}

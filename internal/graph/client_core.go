@@ -50,6 +50,7 @@ var requiredScopes = []string{
 }
 
 const graphBase = "https://graph.microsoft.com/v1.0"
+const graphBeta = "https://graph.microsoft.com/beta"
 
 // authenticator extends azcore.TokenCredential with the Authenticate method
 // shared by InteractiveBrowserCredential and DeviceCodeCredential.
