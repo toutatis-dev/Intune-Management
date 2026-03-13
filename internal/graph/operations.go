@@ -484,13 +484,43 @@ func friendlyAppType(odataType string) string {
 }
 
 func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
-	// @odata.type, isAssigned, and displayVersion live on subtypes or are
-	// computed — they are not valid in $select on the base mobileApp type
-	// but are returned automatically by Graph.
-	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName,publisher")
+	// $select is omitted because subtype fields like displayVersion and
+	// isAssigned are not valid in $select on the base mobileApp type.
+	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps")
 	if err != nil {
 		return "", err
 	}
+
+	// Fetch individual app details to get subtype fields (displayVersion,
+	// isAssigned) that the collection endpoint does not return.
+	detailReqs := make([]batchRequest, len(apps))
+	for i, app := range apps {
+		detailReqs[i] = batchRequest{
+			ID:     fmt.Sprintf("%d", i),
+			Method: "GET",
+			URL:    fmt.Sprintf("/deviceAppManagement/mobileApps/%s", asString(app["id"])),
+		}
+	}
+	detailResps, err := g.batch(ctx, detailReqs)
+	if err != nil {
+		return "", err
+	}
+	for i, resp := range detailResps {
+		if i >= len(apps) || resp.Status < 200 || resp.Status >= 300 {
+			continue
+		}
+		var detail map[string]any
+		if json.Unmarshal(resp.Body, &detail) != nil {
+			continue
+		}
+		if v, ok := detail["displayVersion"]; ok {
+			apps[i]["displayVersion"] = v
+		}
+		if v, ok := detail["isAssigned"]; ok {
+			apps[i]["isAssigned"] = v
+		}
+	}
+
 	type row struct {
 		AppName   string
 		AppType   string
