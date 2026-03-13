@@ -264,24 +264,60 @@ func (g *Client) ReportAppFailureDetails(ctx context.Context, identifier string)
 		return "", err
 	}
 
-	statuses, err := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/deviceStatuses", url.PathEscape(asString(app["id"]))))
+	appID := asString(app["id"])
+	reqBody := map[string]any{
+		"select": []string{"DeviceName", "DeviceId", "UserPrincipalName",
+			"AppInstallStateDetails", "HexErrorCode", "LastModifiedDateTime"},
+		"filter": fmt.Sprintf("(ApplicationId eq '%s')", appID),
+		"top":    1000,
+		"skip":   0,
+	}
+	raw, err := g.do(ctx, http.MethodPost, graphBeta+"/deviceManagement/reports/retrieveDeviceAppInstallationStatusReport", reqBody)
 	if err != nil {
 		return "", err
 	}
+	var report struct {
+		TotalRowCount int `json:"TotalRowCount,omitempty"`
+		Schema        []struct {
+			Column string `json:"Column"`
+		} `json:"Schema"`
+		Values [][]json.RawMessage `json:"Values"`
+	}
+	if err := json.Unmarshal(raw, &report); err != nil {
+		return "", fmt.Errorf("parse report: %w", err)
+	}
+	colIdx := make(map[string]int, len(report.Schema))
+	for i, s := range report.Schema {
+		colIdx[s.Column] = i
+	}
+	getStr := func(row []json.RawMessage, col string) string {
+		idx, ok := colIdx[col]
+		if !ok || idx >= len(row) {
+			return ""
+		}
+		var s string
+		if json.Unmarshal(row[idx], &s) == nil {
+			return s
+		}
+		return strings.Trim(string(row[idx]), `"`)
+	}
 	rows := make([][]string, 0)
-	for _, s := range statuses {
-		if !strings.EqualFold(strings.TrimSpace(asString(s["installState"])), "failed") {
+	for _, row := range report.Values {
+		state := getStr(row, "AppInstallStateDetails")
+		if state == "" || state == "E0" {
 			continue
 		}
-		deviceName := asString(s["deviceDisplayName"])
-		if deviceName == "" {
-			deviceName = asString(s["deviceName"])
+		stateLoc := getStr(row, "AppInstallStateDetails_loc")
+		if stateLoc == "" {
+			stateLoc = state
 		}
 		rows = append(rows, []string{
-			deviceName,
-			asString(s["deviceId"]),
-			asString(s["installState"]),
-			asString(s["lastSyncDateTime"]),
+			getStr(row, "DeviceName"),
+			getStr(row, "DeviceId"),
+			stateLoc,
+			getStr(row, "HexErrorCode"),
+			getStr(row, "UserPrincipalName"),
+			getStr(row, "LastModifiedDateTime"),
 		})
 	}
 	if len(rows) == 0 {
@@ -290,6 +326,6 @@ func (g *Client) ReportAppFailureDetails(ctx context.Context, identifier string)
 	return fmt.Sprintf("Failing App Drill-Down\n\nApp: %s\nFailed devices: %d\n\n%s",
 		asString(app["displayName"]),
 		len(rows),
-		render.RenderTable([]string{"Device Name", "Device ID", "State", "Last Sync"}, rows),
+		render.RenderTable([]string{"Device Name", "Device ID", "State", "Error Code", "User", "Last Modified"}, rows),
 	), nil
 }
