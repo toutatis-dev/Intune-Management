@@ -328,21 +328,21 @@ func TestValueOrDash(t *testing.T) {
 	}
 }
 
-func TestRenderTopFailingAppsReportExcludesZeroFailuresAndShowsSkipped(t *testing.T) {
+func TestRenderTopFailingAppsReportExcludesZeroFailures(t *testing.T) {
 	t.Parallel()
 
 	out := renderTopFailingAppsReport([]appFailureStat{
 		{ID: "a1", Name: "Portal", Failed: 4, Total: 10},
 		{ID: "a2", Name: "VPN", Failed: 0, Total: 8},
 		{ID: "a3", Name: "Agent", Failed: 2, Total: 5},
-	}, failingAppsSummary{Scanned: 3, WithFailures: 2, Skipped: 1})
-	if !strings.Contains(out, "Apps skipped due to errors: 1") {
-		t.Fatalf("expected skipped count in report:\n%s", out)
-	}
+	}, failingAppsSummary{Scanned: 3, WithFailures: 2})
 	if strings.Contains(out, "VPN") {
 		t.Fatalf("expected zero-failure app to be excluded:\n%s", out)
 	}
 	if !strings.Contains(out, "Portal") || !strings.Contains(out, "a1") {
 		t.Fatalf("expected ranked app and ID in report:\n%s", out)
+	}
+	if !strings.Contains(out, "Apps with failures: 2") {
+		t.Fatalf("expected failure count in report:\n%s", out)
 	}
 }

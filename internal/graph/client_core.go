@@ -531,6 +531,18 @@ func asString(v any) string {
 	}
 }
 
+func asInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	default:
+		return 0
+	}
+}
+
 func minInt(a, b int) int {
 	if a < b {
 		return a

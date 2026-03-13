@@ -38,7 +38,6 @@ type appFailureStat struct {
 type failingAppsSummary struct {
 	Scanned      int
 	WithFailures int
-	Skipped      int
 }
 
 func (g *Client) ReportComplianceSnapshot(ctx context.Context) (string, error) {
@@ -149,10 +148,7 @@ func rankFailingApps(stats []appFailureStat) []appFailureStat {
 func renderTopFailingAppsReport(stats []appFailureStat, summary failingAppsSummary) string {
 	ranked := rankFailingApps(stats)
 	if len(ranked) == 0 {
-		if summary.Skipped > 0 {
-			return fmt.Sprintf("Top 10 Failing App Deployments\n\nApps scanned: %d\nApps with failures: 0\nApps skipped due to errors: %d\n\nNo failing app deployments found from successful app status queries.", summary.Scanned, summary.Skipped)
-		}
-		return fmt.Sprintf("Top 10 Failing App Deployments\n\nApps scanned: %d\nApps with failures: 0\nApps skipped due to errors: 0\n\nNo failing app deployments found.", summary.Scanned)
+		return fmt.Sprintf("Top 10 Failing App Deployments\n\nApps scanned: %d\nApps with failures: 0\n\nNo failing app deployments found.", summary.Scanned)
 	}
 	rows := make([][]string, 0, len(ranked))
 	for i, stat := range ranked {
@@ -169,60 +165,79 @@ func renderTopFailingAppsReport(stats []appFailureStat, summary failingAppsSumma
 			rate,
 		})
 	}
-	return fmt.Sprintf("Top 10 Failing App Deployments\n\nApps scanned: %d\nApps with failures: %d\nApps skipped due to errors: %d\n\n%s",
+	return fmt.Sprintf("Top 10 Failing App Deployments\n\nApps scanned: %d\nApps with failures: %d\n\n%s",
 		summary.Scanned,
 		summary.WithFailures,
-		summary.Skipped,
-		render.RenderTable([]string{"Rank", "App", "App ID", "Failed Devices", "Total Statuses", "Failure Rate"}, rows),
+		render.RenderTable([]string{"Rank", "App", "App ID", "Failed Devices", "Total Devices", "Failure Rate"}, rows),
 	)
 }
 
 func (g *Client) ReportTopFailingApps(ctx context.Context) (string, error) {
-	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName")
+	reqBody := map[string]any{
+		"select": []string{"ApplicationId", "DisplayName", "AppVersion",
+			"FailedDeviceCount", "InstalledDeviceCount"},
+		"top":  1000,
+		"skip": 0,
+	}
+	raw, err := g.do(ctx, http.MethodPost, graphBeta+"/deviceManagement/reports/getAppsInstallSummaryReport", reqBody)
 	if err != nil {
 		return "", err
 	}
-	// Build batch requests — one per app for device statuses.
-	reqs := make([]batchRequest, len(apps))
-	for i, app := range apps {
-		reqs[i] = batchRequest{
-			ID:     fmt.Sprintf("%d", i),
-			Method: "GET",
-			URL:    fmt.Sprintf("/deviceAppManagement/mobileApps/%s/deviceStatuses?$select=installState,deviceId", asString(app["id"])),
-		}
+	var report struct {
+		TotalRowCount int `json:"TotalRowCount,omitempty"`
+		Schema        []struct {
+			Column string `json:"Column"`
+		} `json:"Schema"`
+		Values [][]json.RawMessage `json:"Values"`
 	}
-	responses, err := g.batch(ctx, reqs)
-	if err != nil {
-		return "", err
+	if err := json.Unmarshal(raw, &report); err != nil {
+		return "", fmt.Errorf("parse report: %w", err)
 	}
-	stats := make([]appFailureStat, 0, len(apps))
-	summary := failingAppsSummary{Scanned: len(apps)}
-	for i, resp := range responses {
-		result, err := parseBatchValues(resp)
-		if err != nil {
-			summary.Skipped++
-			continue
+	// Build column index.
+	colIdx := make(map[string]int, len(report.Schema))
+	for i, s := range report.Schema {
+		colIdx[s.Column] = i
+	}
+	getStr := func(row []json.RawMessage, col string) string {
+		idx, ok := colIdx[col]
+		if !ok || idx >= len(row) {
+			return ""
 		}
-		statuses := result.Values
-		// Fall back to sequential pagination for the rare paginated response.
-		if result.NextLink != "" {
-			extra, err := g.listFromURL(ctx, result.NextLink)
-			if err != nil {
-				summary.Skipped++
-				continue
-			}
-			statuses = append(result.Values, extra...)
+		var s string
+		if json.Unmarshal(row[idx], &s) == nil {
+			return s
 		}
-		appID := asString(apps[i]["id"])
-		stat := appFailureStat{ID: appID, Name: asString(apps[i]["displayName"]), Total: len(statuses)}
-		for _, s := range statuses {
-			if strings.EqualFold(strings.TrimSpace(asString(s["installState"])), "failed") {
-				stat.Failed++
-			}
+		return strings.Trim(string(row[idx]), `"`)
+	}
+	getInt := func(row []json.RawMessage, col string) int {
+		idx, ok := colIdx[col]
+		if !ok || idx >= len(row) {
+			return 0
 		}
-		if stat.Failed > 0 {
+		var n int
+		if json.Unmarshal(row[idx], &n) == nil {
+			return n
+		}
+		var s string
+		if json.Unmarshal(row[idx], &s) == nil {
+			n, _ = strconv.Atoi(s)
+		}
+		return n
+	}
+	stats := make([]appFailureStat, 0, len(report.Values))
+	summary := failingAppsSummary{Scanned: len(report.Values)}
+	for _, row := range report.Values {
+		failed := getInt(row, "FailedDeviceCount")
+		installed := getInt(row, "InstalledDeviceCount")
+		total := failed + installed
+		if failed > 0 {
 			summary.WithFailures++
-			stats = append(stats, stat)
+			stats = append(stats, appFailureStat{
+				ID:     getStr(row, "ApplicationId"),
+				Name:   getStr(row, "DisplayName"),
+				Failed: failed,
+				Total:  total,
+			})
 		}
 	}
 	return renderTopFailingAppsReport(stats, summary), nil
