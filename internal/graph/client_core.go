@@ -537,8 +537,8 @@ func minInt(a, b int) int {
 	return b
 }
 
-func (g *Client) list(ctx context.Context, path string) ([]map[string]any, error) {
-	next := graphBase + path
+func (g *Client) listFromURL(ctx context.Context, fullURL string) ([]map[string]any, error) {
+	next := fullURL
 	all := make([]map[string]any, 0)
 	for next != "" {
 		b, err := g.do(ctx, http.MethodGet, next, nil)
@@ -550,10 +550,14 @@ func (g *Client) list(ctx context.Context, path string) ([]map[string]any, error
 			return nil, err
 		}
 		all = append(all, page.Value...)
-		g.emitProgress(fmt.Sprintf("Fetched %d items from %s", len(all), path))
+		g.emitProgress(fmt.Sprintf("Fetched %d items from %s", len(all), fullURL))
 		next = page.NextLink
 	}
 	return all, nil
+}
+
+func (g *Client) list(ctx context.Context, path string) ([]map[string]any, error) {
+	return g.listFromURL(ctx, graphBase+path)
 }
 
 // NewStubClient creates a Client with the given config but no credentials.
