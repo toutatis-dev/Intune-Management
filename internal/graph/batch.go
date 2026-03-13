@@ -105,6 +105,10 @@ func parseBatchValues(resp batchResponse) (*batchValueResult, error) {
 }
 
 func (g *Client) batch(ctx context.Context, requests []batchRequest) ([]batchResponse, error) {
+	return g.batchWithEndpoint(ctx, requests, graphBase)
+}
+
+func (g *Client) batchWithEndpoint(ctx context.Context, requests []batchRequest, baseURL string) ([]batchResponse, error) {
 	if len(requests) == 0 {
 		return nil, nil
 	}
@@ -124,7 +128,7 @@ func (g *Client) batch(ctx context.Context, requests []batchRequest) ([]batchRes
 		const maxRounds = 3
 		for round := 0; round < maxRounds; round++ {
 			envelope := batchRequestEnvelope{Requests: pending}
-			raw, err := g.do(ctx, http.MethodPost, graphBase+"/$batch", envelope)
+			raw, err := g.do(ctx, http.MethodPost, baseURL+"/$batch", envelope)
 			if err != nil {
 				return nil, fmt.Errorf("batch chunk %d: %w", ci, err)
 			}

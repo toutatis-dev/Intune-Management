@@ -423,16 +423,118 @@ func (g *Client) AddAppsCSV(ctx context.Context, csvPath string, dryRun bool) (s
 	return b.String(), nil
 }
 
+func valueOrDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+func friendlyAppType(odataType string) string {
+	suffix := strings.TrimPrefix(odataType, "#microsoft.graph.")
+	if suffix == odataType {
+		return odataType // no prefix found
+	}
+	switch suffix {
+	case "win32LobApp":
+		return "Win32"
+	case "windowsMicrosoftEdgeApp":
+		return "Edge"
+	case "winGetApp":
+		return "WinGet"
+	case "microsoftStoreForBusinessApp":
+		return "Store for Business"
+	case "officeSuiteApp":
+		return "Microsoft 365"
+	case "windowsUniversalAppX":
+		return "UWP/APPX"
+	case "windowsMobileMSI":
+		return "MSI"
+	case "windowsWebApp":
+		return "Windows Web"
+	case "webApp":
+		return "Web"
+	case "iosStoreApp":
+		return "iOS Store"
+	case "iosVppApp":
+		return "iOS VPP"
+	case "managedIOSStoreApp":
+		return "Managed iOS"
+	case "androidStoreApp":
+		return "Android Store"
+	case "androidManagedStoreApp":
+		return "Android Managed"
+	case "androidForWorkApp":
+		return "Android for Work"
+	case "managedAndroidStoreApp":
+		return "Managed Android"
+	case "macOSDmgApp":
+		return "macOS DMG"
+	case "macOSLobApp":
+		return "macOS LOB"
+	case "macOSMicrosoftEdgeApp":
+		return "macOS Edge"
+	case "macOSMicrosoftDefenderApp":
+		return "macOS Defender"
+	case "macOSOfficeSuiteApp":
+		return "macOS Office"
+	default:
+		return suffix
+	}
+}
+
 func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
-	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName")
+	// Only select base-type-valid fields; subtype fields (displayVersion,
+	// isAssigned) are fetched via individual detail requests below.
+	// @odata.type is returned automatically and is invalid in $select.
+	apps, err := g.list(ctx, "/deviceAppManagement/mobileApps?$select=id,displayName,publisher")
 	if err != nil {
 		return "", err
 	}
+
+	// Fetch individual app details to get subtype fields (displayVersion,
+	// isAssigned) that the collection endpoint does not return.
+	detailReqs := make([]batchRequest, len(apps))
+	for i, app := range apps {
+		detailReqs[i] = batchRequest{
+			ID:     fmt.Sprintf("%d", i),
+			Method: "GET",
+			URL:    fmt.Sprintf("/deviceAppManagement/mobileApps/%s", asString(app["id"])),
+		}
+	}
+	detailResps, err := g.batchWithEndpoint(ctx, detailReqs, graphBeta)
+	if err != nil {
+		return "", err
+	}
+	var detailFailed int
+	for i, resp := range detailResps {
+		if i >= len(apps) || resp.Status < 200 || resp.Status >= 300 {
+			detailFailed++
+			continue
+		}
+		var detail map[string]any
+		if json.Unmarshal(resp.Body, &detail) != nil {
+			detailFailed++
+			continue
+		}
+		if v, ok := detail["displayVersion"]; ok {
+			apps[i]["displayVersion"] = v
+		}
+		if v, ok := detail["isAssigned"]; ok {
+			apps[i]["isAssigned"] = v
+		}
+	}
+	if detailFailed > 0 {
+		g.emitProgress(fmt.Sprintf("Warning: %d/%d app detail requests failed; some version info may be missing", detailFailed, len(detailResps)))
+	}
+
 	type row struct {
-		AppName      string
-		GroupName    string
-		AssignmentID string
-		Intent       string
+		AppName   string
+		AppType   string
+		Publisher string
+		Version   string
+		GroupName string
+		Intent    string
 	}
 	var rows []row
 	groupNameCache := map[string]string{}
@@ -467,7 +569,11 @@ func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if len(responses) != len(apps) {
+		return "", fmt.Errorf("batch response count %d does not match app count %d", len(responses), len(apps))
+	}
 	skipped := 0
+	hasAssignment := make([]bool, len(apps))
 	for i, resp := range responses {
 		result, err := parseBatchValues(resp)
 		if err != nil {
@@ -497,13 +603,37 @@ func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
 			if groupName == "" {
 				continue
 			}
+			hasAssignment[i] = true
 			rows = append(rows, row{
-				AppName:      asString(apps[i]["displayName"]),
-				GroupName:    groupName,
-				AssignmentID: asString(a["id"]),
-				Intent:       asString(a["intent"]),
+				AppName:   asString(apps[i]["displayName"]),
+				AppType:   friendlyAppType(asString(apps[i]["@odata.type"])),
+				Publisher: valueOrDash(asString(apps[i]["publisher"])),
+				Version:   valueOrDash(asString(apps[i]["displayVersion"])),
+				GroupName: groupName,
+				Intent:    asString(a["intent"]),
 			})
 		}
+	}
+
+	// Add orphaned/unassigned apps. Apps with isAssigned=true but no group
+	// rows (e.g. all-users/all-devices targeting) are intentionally excluded —
+	// they aren't orphaned, they just don't target a specific group.
+	for i, app := range apps {
+		if hasAssignment[i] {
+			continue
+		}
+		assigned, _ := app["isAssigned"].(bool)
+		if assigned {
+			continue
+		}
+		rows = append(rows, row{
+			AppName:   asString(app["displayName"]),
+			AppType:   friendlyAppType(asString(app["@odata.type"])),
+			Publisher: valueOrDash(asString(app["publisher"])),
+			Version:   valueOrDash(asString(app["displayVersion"])),
+			GroupName: "(none)",
+			Intent:    "(unassigned)",
+		})
 	}
 
 	var b strings.Builder
@@ -512,9 +642,9 @@ func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
 	}
 	tabRows := make([][]string, 0, len(rows))
 	for _, r := range rows {
-		tabRows = append(tabRows, []string{r.AppName, r.GroupName, r.AssignmentID, r.Intent})
+		tabRows = append(tabRows, []string{r.AppName, r.AppType, r.Publisher, r.Version, r.GroupName, r.Intent})
 	}
-	fmt.Fprintf(&b, "App-group assignments: %d\n\n%s", len(rows), render.RenderTable([]string{"App", "Group", "Assignment ID", "Intent"}, tabRows))
+	fmt.Fprintf(&b, "App-group assignments: %d\n\n%s", len(rows), render.RenderTable([]string{"App", "Type", "Publisher", "Version", "Group", "Intent"}, tabRows))
 	if skipped > 0 {
 		fmt.Fprintf(&b, "\n(%d apps skipped due to errors)", skipped)
 	}
