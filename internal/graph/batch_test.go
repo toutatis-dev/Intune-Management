@@ -16,6 +16,7 @@ package graph
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -35,7 +36,7 @@ func TestChunkRequests(t *testing.T) {
 		t.Parallel()
 		reqs := make([]batchRequest, 45)
 		for i := range reqs {
-			reqs[i] = batchRequest{ID: string(rune('0' + i))}
+			reqs[i] = batchRequest{ID: fmt.Sprintf("%d", i)}
 		}
 		chunks := chunkRequests(reqs, 20)
 		if len(chunks) != 3 {
@@ -62,29 +63,6 @@ func TestChunkRequests(t *testing.T) {
 	})
 }
 
-func TestSelectRetryable(t *testing.T) {
-	t.Parallel()
-
-	responses := []batchResponse{
-		{ID: "1", Status: 200},
-		{ID: "2", Status: 429},
-		{ID: "3", Status: 404},
-		{ID: "4", Status: 500},
-		{ID: "5", Status: 503},
-		{ID: "6", Status: 403},
-	}
-	ids := selectRetryable(responses)
-	if len(ids) != 3 {
-		t.Fatalf("expected 3 retryable, got %d: %v", len(ids), ids)
-	}
-	want := map[string]bool{"2": true, "4": true, "5": true}
-	for _, id := range ids {
-		if !want[id] {
-			t.Fatalf("unexpected retryable ID: %s", id)
-		}
-	}
-}
-
 func TestMaxRetryAfter(t *testing.T) {
 	t.Parallel()
 
@@ -109,6 +87,32 @@ func TestMaxRetryAfterNoHeaders(t *testing.T) {
 	got := maxRetryAfter(responses)
 	if got != 0 {
 		t.Fatalf("expected 0, got %s", got)
+	}
+}
+
+func TestMaxRetryAfterCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	responses := []batchResponse{
+		{ID: "1", Status: 429, Headers: map[string]string{"RETRY-AFTER": "5"}},
+		{ID: "2", Status: 429, Headers: map[string]string{"retry-After": "10"}},
+		{ID: "3", Status: 429, Headers: map[string]string{"Retry-after": "3"}},
+	}
+	got := maxRetryAfter(responses)
+	if got != 10*time.Second {
+		t.Fatalf("expected 10s, got %s", got)
+	}
+}
+
+func TestMaxRetryAfterClamped(t *testing.T) {
+	t.Parallel()
+
+	responses := []batchResponse{
+		{ID: "1", Status: 429, Headers: map[string]string{"Retry-After": "120"}},
+	}
+	got := maxRetryAfter(responses)
+	if got != 60*time.Second {
+		t.Fatalf("expected 60s (clamped), got %s", got)
 	}
 }
 

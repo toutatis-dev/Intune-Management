@@ -477,12 +477,12 @@ func (g *Client) ListGroupApps(ctx context.Context) (string, error) {
 		assignments := result.Values
 		// Fall back to sequential pagination for the rare paginated response.
 		if result.NextLink != "" {
-			extra, err := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/assignments?$select=id,intent,target", asString(apps[i]["id"])))
+			extra, err := g.listFromURL(ctx, result.NextLink)
 			if err != nil {
 				skipped++
 				continue
 			}
-			assignments = extra
+			assignments = append(result.Values, extra...)
 		}
 		for _, a := range assignments {
 			target, ok := a["target"].(map[string]any)

@@ -67,35 +67,25 @@ func chunkRequests(requests []batchRequest, size int) [][]batchRequest {
 	return chunks
 }
 
-func selectRetryable(responses []batchResponse) []string {
-	var ids []string
-	for _, r := range responses {
-		if r.Status == http.StatusTooManyRequests || r.Status >= 500 {
-			ids = append(ids, r.ID)
-		}
-	}
-	return ids
-}
+const maxRetryWait = 60 * time.Second
 
 func maxRetryAfter(responses []batchResponse) time.Duration {
 	var max time.Duration
 	for _, r := range responses {
-		if r.Headers == nil {
-			continue
-		}
-		ra := r.Headers["Retry-After"]
-		if ra == "" {
-			ra = r.Headers["retry-after"]
-		}
-		if ra == "" {
-			continue
-		}
-		if secs, err := strconv.Atoi(strings.TrimSpace(ra)); err == nil && secs > 0 {
-			d := time.Duration(secs) * time.Second
-			if d > max {
-				max = d
+		for k, v := range r.Headers {
+			if !strings.EqualFold(k, "Retry-After") {
+				continue
+			}
+			if secs, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && secs > 0 {
+				d := time.Duration(secs) * time.Second
+				if d > max {
+					max = d
+				}
 			}
 		}
+	}
+	if max > maxRetryWait {
+		max = maxRetryWait
 	}
 	return max
 }

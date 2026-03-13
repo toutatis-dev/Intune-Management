@@ -206,12 +206,12 @@ func (g *Client) ReportTopFailingApps(ctx context.Context) (string, error) {
 		statuses := result.Values
 		// Fall back to sequential pagination for the rare paginated response.
 		if result.NextLink != "" {
-			extra, err := g.list(ctx, fmt.Sprintf("/deviceAppManagement/mobileApps/%s/deviceStatuses?$select=installState,deviceId", asString(apps[i]["id"])))
+			extra, err := g.listFromURL(ctx, result.NextLink)
 			if err != nil {
 				summary.Skipped++
 				continue
 			}
-			statuses = extra
+			statuses = append(result.Values, extra...)
 		}
 		appID := asString(apps[i]["id"])
 		stat := appFailureStat{ID: appID, Name: asString(apps[i]["displayName"]), Total: len(statuses)}
